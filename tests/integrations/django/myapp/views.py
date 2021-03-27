@@ -1,11 +1,13 @@
+from django import VERSION
 from django.contrib.auth import login
 from django.contrib.auth.models import User
 from django.core.exceptions import PermissionDenied
-from django.http import HttpResponse, HttpResponseServerError, HttpResponseNotFound
+from django.http import HttpResponse, HttpResponseNotFound, HttpResponseServerError
 from django.shortcuts import render
-from django.views.generic import ListView
-from django.views.decorators.csrf import csrf_exempt
+from django.template.response import TemplateResponse
 from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
+from django.views.generic import ListView
 
 try:
     from rest_framework.decorators import api_view
@@ -114,9 +116,38 @@ def template_exc(request, *args, **kwargs):
 
 
 @csrf_exempt
+def template_test(request, *args, **kwargs):
+    return render(request, "user_name.html", {"user_age": 20})
+
+
+@csrf_exempt
+def template_test2(request, *args, **kwargs):
+    return TemplateResponse(request, "user_name.html", {"user_age": 25})
+
+
+@csrf_exempt
 def permission_denied_exc(*args, **kwargs):
     raise PermissionDenied("bye")
 
 
 def csrf_hello_not_exempt(*args, **kwargs):
     return HttpResponse("ok")
+
+
+if VERSION >= (3, 1):
+    # Use exec to produce valid Python 2
+    exec(
+        """async def async_message(request):
+    sentry_sdk.capture_message("hi")
+    return HttpResponse("ok")"""
+    )
+
+    exec(
+        """async def my_async_view(request):
+    import asyncio
+    await asyncio.sleep(1)
+    return HttpResponse('Hello World')"""
+    )
+else:
+    async_message = None
+    my_async_view = None

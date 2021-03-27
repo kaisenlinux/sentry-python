@@ -45,6 +45,8 @@ urlpatterns = [
     ),
     path("post-echo", views.post_echo, name="post_echo"),
     path("template-exc", views.template_exc, name="template_exc"),
+    path("template-test", views.template_test, name="template_test"),
+    path("template-test2", views.template_test2, name="template_test2"),
     path(
         "permission-denied-exc",
         views.permission_denied_exc,
@@ -57,7 +59,14 @@ urlpatterns = [
     ),
 ]
 
+# async views
+if views.async_message is not None:
+    urlpatterns.append(path("async_message", views.async_message, name="async_message"))
 
+if views.my_async_view is not None:
+    urlpatterns.append(path("my_async_view", views.my_async_view, name="my_async_view"))
+
+# rest framework
 try:
     urlpatterns.append(
         path("rest-framework-exc", views.rest_framework_exc, name="rest_framework_exc")

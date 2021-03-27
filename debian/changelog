@@ -1,3 +1,11 @@
+sentry-python (0.20.3-1kaisen1) kaisen-packages; urgency=medium
+
+  * Import new upstream release
+  * Update compat to 13
+  * Update control file
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Sat, 27 Mar 2021 06:35:24 +0200
+
 sentry-python (0.18.0-1kaisen1) kaisen-packages; urgency=medium
 
   * New upstream release

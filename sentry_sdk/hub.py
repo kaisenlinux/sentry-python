@@ -1,5 +1,4 @@
 import copy
-import random
 import sys
 
 from datetime import datetime
@@ -9,7 +8,7 @@ from sentry_sdk._compat import with_metaclass
 from sentry_sdk.scope import Scope
 from sentry_sdk.client import Client
 from sentry_sdk.tracing import Span, Transaction
-from sentry_sdk.sessions import Session
+from sentry_sdk.session import Session
 from sentry_sdk.utils import (
     exc_info_from_error,
     event_from_exception,
@@ -312,7 +311,7 @@ class Hub(with_metaclass(HubMeta)):  # type: ignore
         event,  # type: Event
         hint=None,  # type: Optional[Hint]
         scope=None,  # type: Optional[Any]
-        **scope_args  # type: Dict[str, Any]
+        **scope_args  # type: Any
     ):
         # type: (...) -> Optional[str]
         """Captures an event. Alias of :py:meth:`sentry_sdk.Client.capture_event`."""
@@ -330,7 +329,7 @@ class Hub(with_metaclass(HubMeta)):  # type: ignore
         message,  # type: str
         level=None,  # type: Optional[str]
         scope=None,  # type: Optional[Any]
-        **scope_args  # type: Dict[str, Any]
+        **scope_args  # type: Any
     ):
         # type: (...) -> Optional[str]
         """Captures a message.  The message is just a string.  If no level
@@ -350,7 +349,7 @@ class Hub(with_metaclass(HubMeta)):  # type: ignore
         self,
         error=None,  # type: Optional[Union[BaseException, ExcInfo]]
         scope=None,  # type: Optional[Any]
-        **scope_args  # type: Dict[str, Any]
+        **scope_args  # type: Any
     ):
         # type: (...) -> Optional[str]
         """Captures an exception.
@@ -505,20 +504,28 @@ class Hub(with_metaclass(HubMeta)):  # type: ignore
         When the transaction is finished, it will be sent to Sentry with all its
         finished child spans.
         """
+        custom_sampling_context = kwargs.pop("custom_sampling_context", {})
+
+        # if we haven't been given a transaction, make one
         if transaction is None:
             kwargs.setdefault("hub", self)
             transaction = Transaction(**kwargs)
 
-        client, scope = self._stack[-1]
+        # use traces_sample_rate, traces_sampler, and/or inheritance to make a
+        # sampling decision
+        sampling_context = {
+            "transaction_context": transaction.to_json(),
+            "parent_sampled": transaction.parent_sampled,
+        }
+        sampling_context.update(custom_sampling_context)
+        transaction._set_initial_sampling_decision(sampling_context=sampling_context)
 
-        if transaction.sampled is None:
-            sample_rate = client and client.options["traces_sample_rate"] or 0
-            transaction.sampled = random.random() < sample_rate
-
+        # we don't bother to keep spans if we already know we're not going to
+        # send the transaction
         if transaction.sampled:
             max_spans = (
-                client and client.options["_experiments"].get("max_spans") or 1000
-            )
+                self.client and self.client.options["_experiments"].get("max_spans")
+            ) or 1000
             transaction.init_span_recorder(maxlen=max_spans)
 
         return transaction
@@ -632,11 +639,12 @@ class Hub(with_metaclass(HubMeta)):  # type: ignore
         """Ends the current session if there is one."""
         client, scope = self._stack[-1]
         session = scope._session
+        self.scope._session = None
+
         if session is not None:
             session.close()
             if client is not None:
                 client.capture_session(session)
-        self.scope._session = None
 
     def stop_auto_session_tracking(self):
         # type: (...) -> None

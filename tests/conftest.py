@@ -4,8 +4,15 @@ import json
 import pytest
 import jsonschema
 
-import gevent
-import eventlet
+try:
+    import gevent
+except ImportError:
+    gevent = None
+
+try:
+    import eventlet
+except ImportError:
+    eventlet = None
 
 import sentry_sdk
 from sentry_sdk._compat import reraise, string_types, iteritems
@@ -48,6 +55,8 @@ def internal_exceptions(request, monkeypatch):
 
     @request.addfinalizer
     def _():
+        # rerasise the errors so that this just acts as a pass-through (that
+        # happens to keep track of the errors which pass through it)
         for e in errors:
             reraise(*e)
 
@@ -135,8 +144,10 @@ def monkeypatch_test_transport(monkeypatch, validate_event_schema):
     def check_envelope(envelope):
         with capture_internal_exceptions():
             # Assert error events are sent without envelope to server, for compat.
-            assert not any(item.data_category == "error" for item in envelope.items)
-            assert not any(item.get_event() is not None for item in envelope.items)
+            # This does not apply if any item in the envelope is an attachment.
+            if not any(x.type == "attachment" for x in envelope.items):
+                assert not any(item.data_category == "error" for item in envelope.items)
+                assert not any(item.get_event() is not None for item in envelope.items)
 
     def inner(client):
         monkeypatch.setattr(
@@ -280,6 +291,9 @@ class EventStreamReader(object):
 )
 def maybe_monkeypatched_threading(request):
     if request.param == "eventlet":
+        if eventlet is None:
+            pytest.skip("no eventlet installed")
+
         try:
             eventlet.monkey_patch()
         except AttributeError as e:
@@ -289,6 +303,8 @@ def maybe_monkeypatched_threading(request):
             else:
                 raise
     elif request.param == "gevent":
+        if gevent is None:
+            pytest.skip("no gevent installed")
         try:
             gevent.monkey.patch_all()
         except Exception as e:
@@ -325,3 +341,180 @@ def render_span_tree():
         return "\n".join(render_span(root_span))
 
     return inner
+
+
+@pytest.fixture(name="StringContaining")
+def string_containing_matcher():
+    """
+    An object which matches any string containing the substring passed to the
+    object at instantiation time.
+
+    Useful for assert_called_with, assert_any_call, etc.
+
+    Used like this:
+
+    >>> f = mock.Mock()
+    >>> f("dogs are great")
+    >>> f.assert_any_call("dogs") # will raise AssertionError
+    Traceback (most recent call last):
+        ...
+    AssertionError: mock('dogs') call not found
+    >>> f.assert_any_call(StringContaining("dogs")) # no AssertionError
+
+    """
+
+    class StringContaining(object):
+        def __init__(self, substring):
+            self.substring = substring
+
+            try:
+                # unicode only exists in python 2
+                self.valid_types = (str, unicode)  # noqa
+            except NameError:
+                self.valid_types = (str,)
+
+        def __eq__(self, test_string):
+            if not isinstance(test_string, self.valid_types):
+                return False
+
+            if len(self.substring) > len(test_string):
+                return False
+
+            return self.substring in test_string
+
+        def __ne__(self, test_string):
+            return not self.__eq__(test_string)
+
+    return StringContaining
+
+
+def _safe_is_equal(x, y):
+    """
+    Compares two values, preferring to use the first's __eq__ method if it
+    exists and is implemented.
+
+    Accounts for py2/py3 differences (like ints in py2 not having a __eq__
+    method), as well as the incomparability of certain types exposed by using
+    raw __eq__ () rather than ==.
+    """
+
+    # Prefer using __eq__ directly to ensure that examples like
+    #
+    #   maisey = Dog()
+    #   maisey.name = "Maisey the Dog"
+    #   maisey == ObjectDescribedBy(attrs={"name": StringContaining("Maisey")})
+    #
+    # evaluate to True (in other words, examples where the values in self.attrs
+    # might also have custom __eq__ methods; this makes sure those methods get
+    # used if possible)
+    try:
+        is_equal = x.__eq__(y)
+    except AttributeError:
+        is_equal = NotImplemented
+
+    # this can happen on its own, too (i.e. without an AttributeError being
+    # thrown), which is why this is separate from the except block above
+    if is_equal == NotImplemented:
+        # using == smoothes out weird variations exposed by raw __eq__
+        return x == y
+
+    return is_equal
+
+
+@pytest.fixture(name="DictionaryContaining")
+def dictionary_containing_matcher():
+    """
+    An object which matches any dictionary containing all key-value pairs from
+    the dictionary passed to the object at instantiation time.
+
+    Useful for assert_called_with, assert_any_call, etc.
+
+    Used like this:
+
+    >>> f = mock.Mock()
+    >>> f({"dogs": "yes", "cats": "maybe"})
+    >>> f.assert_any_call({"dogs": "yes"}) # will raise AssertionError
+    Traceback (most recent call last):
+        ...
+    AssertionError: mock({'dogs': 'yes'}) call not found
+    >>> f.assert_any_call(DictionaryContaining({"dogs": "yes"})) # no AssertionError
+    """
+
+    class DictionaryContaining(object):
+        def __init__(self, subdict):
+            self.subdict = subdict
+
+        def __eq__(self, test_dict):
+            if not isinstance(test_dict, dict):
+                return False
+
+            if len(self.subdict) > len(test_dict):
+                return False
+
+            for key, value in self.subdict.items():
+                try:
+                    test_value = test_dict[key]
+                except KeyError:  # missing key
+                    return False
+
+                if not _safe_is_equal(value, test_value):
+                    return False
+
+            return True
+
+        def __ne__(self, test_dict):
+            return not self.__eq__(test_dict)
+
+    return DictionaryContaining
+
+
+@pytest.fixture(name="ObjectDescribedBy")
+def object_described_by_matcher():
+    """
+    An object which matches any other object with the given properties.
+
+    Available properties currently are "type" (a type object) and "attrs" (a
+    dictionary).
+
+    Useful for assert_called_with, assert_any_call, etc.
+
+    Used like this:
+
+    >>> class Dog(object):
+    ...     pass
+    ...
+    >>> maisey = Dog()
+    >>> maisey.name = "Maisey"
+    >>> maisey.age = 7
+    >>> f = mock.Mock()
+    >>> f(maisey)
+    >>> f.assert_any_call(ObjectDescribedBy(type=Dog)) # no AssertionError
+    >>> f.assert_any_call(ObjectDescribedBy(attrs={"name": "Maisey"})) # no AssertionError
+    """
+
+    class ObjectDescribedBy(object):
+        def __init__(self, type=None, attrs=None):
+            self.type = type
+            self.attrs = attrs
+
+        def __eq__(self, test_obj):
+            if self.type:
+                if not isinstance(test_obj, self.type):
+                    return False
+
+            if self.attrs:
+                for attr_name, attr_value in self.attrs.items():
+                    try:
+                        test_value = getattr(test_obj, attr_name)
+                    except AttributeError:  # missing attribute
+                        return False
+
+                    if not _safe_is_equal(attr_value, test_value):
+                        return False
+
+            return True
+
+        def __ne__(self, test_obj):
+            return not self.__eq__(test_obj)
+
+    return ObjectDescribedBy

@@ -14,7 +14,6 @@ if MYPY:
     from sentry_sdk.integrations.wsgi import _ScopedResponse
     from typing import Any
     from typing import Dict
-    from werkzeug.datastructures import ImmutableTypeConversionDict
     from werkzeug.datastructures import ImmutableMultiDict
     from werkzeug.datastructures import FileStorage
     from typing import Union
@@ -43,6 +42,10 @@ try:
 except ImportError:
     raise DidNotEnable("Flask is not installed")
 
+try:
+    import blinker  # noqa
+except ImportError:
+    raise DidNotEnable("blinker is not installed")
 
 TRANSACTION_STYLE_VALUES = ("endpoint", "url")
 
@@ -100,7 +103,8 @@ def _request_started(sender, **kwargs):
     with hub.configure_scope() as scope:
         request = _request_ctx_stack.top.request
 
-        # Rely on WSGI middleware to start a trace
+        # Set the transaction name here, but rely on WSGI middleware to actually
+        # start the transaction
         try:
             if integration.transaction_style == "endpoint":
                 scope.transaction = request.url_rule.endpoint
@@ -122,8 +126,11 @@ class FlaskRequestExtractor(RequestExtractor):
         return self.request.environ
 
     def cookies(self):
-        # type: () -> ImmutableTypeConversionDict[Any, Any]
-        return self.request.cookies
+        # type: () -> Dict[Any, Any]
+        return {
+            k: v[0] if isinstance(v, list) and len(v) == 1 else v
+            for k, v in self.request.cookies.items()
+        }
 
     def raw_data(self):
         # type: () -> bytes
