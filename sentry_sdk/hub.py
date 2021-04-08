@@ -623,7 +623,9 @@ class Hub(with_metaclass(HubMeta)):  # type: ignore
 
         return inner()
 
-    def start_session(self):
+    def start_session(
+        self, session_mode="application"  # type: str
+    ):
         # type: (...) -> None
         """Starts a new session."""
         self.end_session()
@@ -632,6 +634,7 @@ class Hub(with_metaclass(HubMeta)):  # type: ignore
             release=client.options["release"] if client else None,
             environment=client.options["environment"] if client else None,
             user=scope._user,
+            session_mode=session_mode,
         )
 
     def end_session(self):
@@ -679,14 +682,18 @@ class Hub(with_metaclass(HubMeta)):  # type: ignore
         if client is not None:
             return client.flush(timeout=timeout, callback=callback)
 
-    def iter_trace_propagation_headers(self):
-        # type: () -> Generator[Tuple[str, str], None, None]
-        # TODO: Document
-        client, scope = self._stack[-1]
-        span = scope.span
-
-        if span is None:
+    def iter_trace_propagation_headers(self, span=None):
+        # type: (Optional[Span]) -> Generator[Tuple[str, str], None, None]
+        """
+        Return HTTP headers which allow propagation of trace data. Data taken
+        from the span representing the request, if available, or the current
+        span on the scope if not.
+        """
+        span = span or self.scope.span
+        if not span:
             return
+
+        client = self._stack[-1][0]
 
         propagate_traces = client and client.options["propagate_traces"]
         if not propagate_traces:
