@@ -19,7 +19,7 @@ if MYPY:
 sentry_sdk.init(
     dsn=os.environ["SENTRY_DSN"],
     integrations=[AwsLambdaIntegration(timeout_warning=True)],
-    traces_sample_rate=float(os.environ["SENTRY_TRACES_SAMPLE_RATE"])
+    traces_sample_rate=float(os.environ["SENTRY_TRACES_SAMPLE_RATE"]),
 )
 
 
@@ -35,4 +35,4 @@ def sentry_lambda_handler(event, context):
         raise ValueError("Incorrect AWS Handler path (Not a path)")
     lambda_function = __import__(module_name)
     lambda_handler = getattr(lambda_function, handler_name)
-    lambda_handler(event, context)
+    return lambda_handler(event, context)
