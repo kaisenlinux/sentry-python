@@ -1,24 +1,65 @@
-# Changelog and versioning
+# Changelog
 
-## Versioning Policy
+## 1.5.10
 
-This project follows [semver](https://semver.org/), with three additions:
+### Various fixes & improvements
 
-- Semver says that major version `0` can include breaking changes at any time. Still, it is common practice to assume that only `0.x` releases (minor versions) can contain breaking changes while `0.x.y` releases (patch versions) are used for backwards-compatible changes (bugfixes and features). This project also follows that practice.
+- Remove Flask version contraint (#1395) by @antonpirker
+- Change ordering of event drop mechanisms (#1390) by @adinauer
 
-- All undocumented APIs are considered internal. They are not part of this contract.
+## 1.5.9
 
-- Certain features (e.g. integrations) may be explicitly called out as "experimental" or "unstable" in the documentation. They come with their own versioning policy described in the documentation.
+### Various fixes & improvements
 
-We recommend to pin your version requirements against `1.x.*` or `1.x.y`.
-Either one of the following is fine:
+- fix(sqlalchemy): Use context instead of connection in sqlalchemy integration (#1388) by @sl0thentr0py
+- Update correct test command in contributing docs (#1377) by @targhs
+- Update black (#1379) by @antonpirker
+- build(deps): bump sphinx from 4.1.1 to 4.5.0 (#1376) by @dependabot
+- fix: Auto-enabling Redis and Pyramid integration (#737) by @untitaker
+- feat(testing): Add pytest-watch (#853) by @lobsterkatie
+- Treat x-api-key header as sensitive (#1236) by @simonschmidt
+- fix: Remove obsolete MAX_FORMAT_PARAM_LENGTH (#1375) by @blueyed
 
-```
-sentry-sdk>=1.0.0,<2.0.0
-sentry-sdk==1.5.0
-```
+## 1.5.8
 
-A major release `N` implies the previous release `N-1` will no longer receive updates. We generally do not backport bugfixes to older versions unless they are security relevant. However, feel free to ask for backports of specific commits on the bugtracker.
+### Various fixes & improvements
+
+- feat(asgi): Add support for setting transaction name to path in FastAPI (#1349) by @tiangolo
+- fix(sqlalchemy): Change context manager type to avoid race in threads (#1368) by @Fofanko
+- fix(perf): Fix transaction setter on scope to use containing_transaction to match with getter (#1366) by @sl0thentr0py
+- chore(ci): Change stale GitHub workflow to run once a day (#1367) by @kamilogorek
+- feat(django): Make django middleware expose more wrapped attributes (#1202) by @MattFisher
+
+## 1.5.7
+
+### Various fixes & improvements
+
+- fix(serializer): Make sentry_repr dunder method to avoid mock problems (#1364) by @sl0thentr0py
+
+## 1.5.6
+
+### Various fixes & improvements
+
+- Create feature.yml (#1350) by @vladanpaunovic
+- Update contribution guide (#1346) by @antonpirker
+- chore: add bug issue template (#1345) by @vladanpaunovic
+- Added default value for auto_session_tracking (#1337) by @antonpirker
+- docs(readme): reordered content (#1343) by @antonpirker
+- fix(tests): Removed unsupported Django 1.6 from tests to avoid confusion (#1338) by @antonpirker
+- Group captured warnings under separate issues (#1324) by @mnito
+- build(changelogs): Use automated changelogs from Craft (#1340) by @BYK
+- fix(aiohttp): AioHttpIntegration sentry_app_handle() now ignores ConnectionResetError (#1331) by @cmalek
+- meta: Remove black GH action (#1339) by @sl0thentr0py
+- feat(flask): Add `sentry_trace()` template helper (#1336) by @BYK
+
+## 1.5.5
+
+- Add session tracking to ASGI integration (#1329)
+- Pinning test requirements versions (#1330)
+- Allow classes to short circuit serializer with `sentry_repr` (#1322)
+- Set default on json.dumps in compute_tracestate_value to ensure string conversion (#1318)
+
+Work in this release contributed by @tomchuk. Thank you for your contribution!
 
 ## 1.5.4
 
@@ -107,7 +148,7 @@ Work in this release contributed by @galuszkak, @kianmeng, @ahopkins, @razumeiko
 This release contains a breaking change
 
 - **BREAKING CHANGE**: Feat: Moved `auto_session_tracking` experimental flag to a proper option and removed explicitly setting experimental `session_mode` in favor of auto detecting its value, hence enabling release health by default #994
-- Fixed Django transaction name by setting the name to  `request.path_info` rather than `request.path`
+- Fixed Django transaction name by setting the name to `request.path_info` rather than `request.path`
 - Fix for tracing by getting HTTP headers from span rather than transaction when possible #1035
 - Fix for Flask transactions missing request body in non errored transactions #1034
 - Fix for honoring the `X-Forwarded-For` header #1037
@@ -128,7 +169,7 @@ This release contains a breaking change
 ## 0.20.0
 
 - Fix for header extraction for AWS lambda/API extraction
-- Fix multiple **kwargs type hints # 967
+- Fix multiple \*\*kwargs type hints # 967
 - Fix that corrects AWS lambda integration failure to detect the aws-lambda-ric 1.0 bootstrap #976
 - Fix AWSLambda integration: variable "timeout_thread" referenced before assignment #977
 - Use full git sha as release name #960
