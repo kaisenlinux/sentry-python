@@ -270,12 +270,10 @@ class Auth(object):
             type,
         )
 
-    def to_header(self, timestamp=None):
-        # type: (Optional[datetime]) -> str
+    def to_header(self):
+        # type: () -> str
         """Returns the auth header a string."""
         rv = [("sentry_key", self.public_key), ("sentry_version", self.version)]
-        if timestamp is not None:
-            rv.append(("sentry_timestamp", str(to_timestamp(timestamp))))
         if self.client is not None:
             rv.append(("sentry_client", self.client))
         if self.secret_key is not None:
@@ -931,7 +929,7 @@ def transaction_from_function(func):
 disable_capture_event = ContextVar("disable_capture_event")
 
 
-class ServerlessTimeoutWarning(Exception):
+class ServerlessTimeoutWarning(Exception):  # noqa: N818
     """Raised when a serverless method is about to reach its timeout."""
 
     pass

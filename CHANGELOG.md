@@ -1,5 +1,131 @@
 # Changelog
 
+## 1.9.5
+
+### Various fixes & improvements
+
+- fix(redis): import redis pipeline using full path (#1565) by @olksdr
+- Fix side effects for parallel tests (#1554) by @sl0thentr0py
+
+## 1.9.4
+
+### Various fixes & improvements
+
+- Remove TRANSACTION_SOURCE_UNKNOWN and default to CUSTOM (#1558) by @sl0thentr0py
+- feat(redis): Add instrumentation for redis pipeline (#1543) by @jjbayer
+- Handle no release when uploading profiles (#1548) by @szokeasaurusrex
+
+## 1.9.3
+
+### Various fixes & improvements
+
+- Wrap StarletteRequestExtractor in capture_internal_exceptions (#1551) by @sl0thentr0py
+
+## 1.9.2
+
+### Various fixes & improvements
+
+- chore: remove quotes (#1545) by @vladanpaunovic
+
+## 1.9.1
+
+### Various fixes & improvements
+
+- Fix FastAPI issues (#1532) ( #1514) (#1532) by @antonpirker
+- Add deprecation warning for 3.4, 3.5 (#1541) by @sl0thentr0py
+- Fast tests (#1504) by @antonpirker
+- Replace Travis CI badge with GitHub Actions badge (#1538) by @153957
+- chore(deps): update urllib3 minimum version with environment markers (#1312) by @miketheman
+- Update Flask and Quart integrations (#1520) by @pgjones
+- chore: Remove ancient examples from tracing prototype (#1528) by @sl0thentr0py
+- fix(django): Send correct "url" transaction source if Django resolver fails to resolve (#1525) by @sl0thentr0py
+
+## 1.9.0
+
+### Various fixes & improvements
+
+- feat(profiler): Add experimental profiler under experiments.enable_profiling (#1481) by @szokeasaurusrex
+- Fixed problem with broken response and python-multipart (#1516) by @antonpirker
+
+## 1.8.0
+
+### Various fixes & improvements
+
+- feat(starlette): add Starlette integration (#1441) by @sl0thentr0py
+    
+    **Important:** Remove manual usage of `SentryAsgiMiddleware`! This is now done by the Starlette integration.
+    
+    Usage:
+    
+    ```python
+    from starlette.applications import Starlette
+    
+    from sentry_sdk.integrations.starlette import StarletteIntegration
+    
+    sentry_sdk.init(
+        dsn="...", 
+        integrations=[StarletteIntegration()],
+    )
+    
+    app = Starlette(debug=True, routes=[...])
+    ```
+- feat(fastapi): add FastAPI integration (#829) by @antonpirker
+    
+    **Important:** Remove manual usage of `SentryAsgiMiddleware`! This is now done by the FastAPI integration.
+    
+    Usage:
+    
+    ```python
+    from fastapi import FastAPI
+    
+    from sentry_sdk.integrations.starlette import StarletteIntegration
+    from sentry_sdk.integrations.fastapi import FastApiIntegration
+
+    sentry_sdk.init(
+        dsn="...", 
+        integrations=[StarletteIntegration(), FastApiIntegration()],
+    )
+    
+    app = FastAPI()
+    ```
+    
+    Yes, you have to add both, the `StarletteIntegration` **AND** the `FastApiIntegration`!
+- fix: avoid sending empty Baggage header (#1507) by @intgr
+- fix: properly freeze Baggage object (#1508) by @intgr
+- docs: fix simple typo, collecter -> collector (#1505) by @timgates42
+
+## 1.7.2
+
+### Various fixes & improvements
+
+- feat(transactions): Transaction Source (#1490) by @antonpirker
+- Removed (unused) sentry_timestamp header (#1494) by @antonpirker
+
+## 1.7.1
+
+### Various fixes & improvements
+
+- Skip malformed baggage items (#1491) by @robyoung
+
+## 1.7.0
+
+### Various fixes & improvements
+
+- feat(tracing): Dynamic Sampling Context / Baggage continuation (#1485) by @sl0thentr0py
+
+  The SDK now propagates the [W3C Baggage Header](https://www.w3.org/TR/baggage/) from
+  incoming transactions to outgoing requests.  
+  It also extracts Sentry specific [sampling information](https://develop.sentry.dev/sdk/performance/dynamic-sampling-context/)
+  and adds it to the transaction headers to enable Dynamic Sampling in the product.
+
+## 1.6.0
+
+### Various fixes & improvements
+
+- Fix Deployment (#1474) by @antonpirker
+- Serverless V2 (#1450) by @antonpirker
+- Use logging levelno instead of levelname.  Levelnames can be overridden (#1449) by @rrauenza
+
 ## 1.5.12
 
 ### Various fixes & improvements
