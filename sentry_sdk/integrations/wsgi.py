@@ -1,6 +1,7 @@
 import sys
 
 from sentry_sdk._functools import partial
+from sentry_sdk.consts import OP
 from sentry_sdk.hub import Hub, _should_send_default_pii
 from sentry_sdk.utils import (
     ContextVar,
@@ -11,7 +12,7 @@ from sentry_sdk._compat import PY2, reraise, iteritems
 from sentry_sdk.tracing import Transaction, TRANSACTION_SOURCE_ROUTE
 from sentry_sdk.sessions import auto_session_tracking
 from sentry_sdk.integrations._wsgi_common import _filter_headers
-from sentry_sdk.profiler import profiling
+from sentry_sdk.profiler import start_profiling
 
 from sentry_sdk._types import MYPY
 
@@ -124,14 +125,14 @@ class SentryWsgiMiddleware(object):
 
                     transaction = Transaction.continue_from_environ(
                         environ,
-                        op="http.server",
+                        op=OP.HTTP_SERVER,
                         name="generic WSGI request",
                         source=TRANSACTION_SOURCE_ROUTE,
                     )
 
                     with hub.start_transaction(
                         transaction, custom_sampling_context={"wsgi_environ": environ}
-                    ), profiling(transaction, hub):
+                    ), start_profiling(transaction, hub):
                         try:
                             rv = self.app(
                                 environ,
