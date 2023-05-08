@@ -9,6 +9,7 @@ from sentry_sdk.integrations.opentelemetry.span_processor import (
 from sentry_sdk.tracing import Span, Transaction
 
 from opentelemetry.trace import SpanKind, SpanContext
+from sentry_sdk.tracing_utils import extract_sentrytrace_data
 
 
 def test_is_sentry_span():
@@ -103,7 +104,9 @@ def test_get_trace_data_with_sentry_trace():
     with mock.patch(
         "sentry_sdk.integrations.opentelemetry.span_processor.get_value",
         side_effect=[
-            ("1234567890abcdef1234567890abcdef", "1234567890abcdef", True),
+            extract_sentrytrace_data(
+                "1234567890abcdef1234567890abcdef-1234567890abcdef-1"
+            ),
             None,
         ],
     ):
@@ -118,7 +121,9 @@ def test_get_trace_data_with_sentry_trace():
     with mock.patch(
         "sentry_sdk.integrations.opentelemetry.span_processor.get_value",
         side_effect=[
-            ("1234567890abcdef1234567890abcdef", "1234567890abcdef", False),
+            extract_sentrytrace_data(
+                "1234567890abcdef1234567890abcdef-1234567890abcdef-0"
+            ),
             None,
         ],
     ):
@@ -150,7 +155,9 @@ def test_get_trace_data_with_sentry_trace_and_baggage():
     with mock.patch(
         "sentry_sdk.integrations.opentelemetry.span_processor.get_value",
         side_effect=[
-            ("1234567890abcdef1234567890abcdef", "1234567890abcdef", True),
+            extract_sentrytrace_data(
+                "1234567890abcdef1234567890abcdef-1234567890abcdef-1"
+            ),
             baggage,
         ],
     ):
@@ -205,14 +212,14 @@ def test_update_span_with_otel_data_http_method2():
         "http.status_code": 429,
         "http.status_text": "xxx",
         "http.user_agent": "curl/7.64.1",
-        "http.url": "https://httpbin.org/status/403?password=123&username=test@example.com&author=User123&auth=1234567890abcdef",
+        "http.url": "https://example.com/status/403?password=123&username=test@example.com&author=User123&auth=1234567890abcdef",
     }
 
     span_processor = SentrySpanProcessor()
     span_processor._update_span_with_otel_data(sentry_span, otel_span)
 
     assert sentry_span.op == "http.server"
-    assert sentry_span.description == "GET https://httpbin.org/status/403"
+    assert sentry_span.description == "GET https://example.com/status/403"
     assert sentry_span._tags["http.status_code"] == "429"
     assert sentry_span.status == "resource_exhausted"
 
@@ -222,7 +229,7 @@ def test_update_span_with_otel_data_http_method2():
     assert sentry_span._data["http.user_agent"] == "curl/7.64.1"
     assert (
         sentry_span._data["http.url"]
-        == "https://httpbin.org/status/403?password=123&username=test@example.com&author=User123&auth=1234567890abcdef"
+        == "https://example.com/status/403?password=123&username=test@example.com&author=User123&auth=1234567890abcdef"
     )
 
 

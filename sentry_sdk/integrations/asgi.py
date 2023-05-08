@@ -9,7 +9,7 @@ import inspect
 import urllib
 
 from sentry_sdk._functools import partial
-from sentry_sdk._types import MYPY
+from sentry_sdk._types import TYPE_CHECKING
 from sentry_sdk.consts import OP
 from sentry_sdk.hub import Hub, _should_send_default_pii
 from sentry_sdk.integrations._wsgi_common import _filter_headers
@@ -29,7 +29,7 @@ from sentry_sdk.utils import (
 )
 from sentry_sdk.tracing import Transaction
 
-if MYPY:
+if TYPE_CHECKING:
     from typing import Dict
     from typing import Any
     from typing import Optional
@@ -108,7 +108,7 @@ class SentryAsgiMiddleware:
             )
 
         asgi_middleware_while_using_starlette_or_fastapi = (
-            "starlette" in _get_installed_modules() and mechanism_type == "asgi"
+            mechanism_type == "asgi" and "starlette" in _get_installed_modules()
         )
         if asgi_middleware_while_using_starlette_or_fastapi:
             logger.warning(

@@ -21,7 +21,7 @@ def get_file_text(file_name):
 
 setup(
     name="sentry-sdk",
-    version="1.12.1",
+    version="1.17.0",
     author="Sentry Team and Contributors",
     author_email="hello@sentry.io",
     url="https://github.com/getsentry/sentry-python",
@@ -36,7 +36,7 @@ setup(
     # PEP 561
     package_data={"sentry_sdk": ["py.typed"]},
     zip_safe=False,
-    license="BSD",
+    license="MIT",
     install_requires=[
         'urllib3>=1.25.7; python_version<="3.4"',
         'urllib3>=1.26.9; python_version=="3.5"',
@@ -51,7 +51,9 @@ setup(
         "django": ["django>=1.8"],
         "sanic": ["sanic>=0.8"],
         "celery": ["celery>=3"],
+        "huey": ["huey>=2"],
         "beam": ["apache-beam>=2.12"],
+        "arq": ["arq>=0.23"],
         "rq": ["rq>=0.6"],
         "aiohttp": ["aiohttp>=3.5"],
         "tornado": ["tornado>=5"],
@@ -61,9 +63,10 @@ setup(
         "chalice": ["chalice>=1.16.0"],
         "httpx": ["httpx>=0.16.0"],
         "starlette": ["starlette>=0.19.1"],
+        "starlite": ["starlite>=1.48"],
         "fastapi": ["fastapi>=0.79.0"],
         "pymongo": ["pymongo>=3.1"],
-        "opentelemetry": ["opentelemetry-distro>=0.350b0"],
+        "opentelemetry": ["opentelemetry-distro>=0.35b0"],
     },
     classifiers=[
         "Development Status :: 5 - Production/Stable",
