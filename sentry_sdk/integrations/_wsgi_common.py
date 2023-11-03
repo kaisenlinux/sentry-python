@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 
 from sentry_sdk.hub import Hub, _should_send_default_pii
 from sentry_sdk.utils import AnnotatedValue
@@ -36,7 +37,7 @@ def request_body_within_bounds(client, content_length):
     if client is None:
         return False
 
-    bodies = client.options["request_bodies"]
+    bodies = client.options["max_request_body_size"]
     return not (
         bodies == "never"
         or (bodies == "small" and content_length > 10**3)
@@ -77,7 +78,7 @@ class RequestExtractor(object):
         if data is not None:
             request_info["data"] = data
 
-        event["request"] = request_info
+        event["request"] = deepcopy(request_info)
 
     def content_length(self):
         # type: () -> int

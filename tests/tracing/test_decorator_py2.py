@@ -1,9 +1,12 @@
-import mock
-
 from sentry_sdk.tracing_utils_py2 import (
     start_child_span_decorator as start_child_span_decorator_py2,
 )
 from sentry_sdk.utils import logger
+
+try:
+    from unittest import mock  # python 3.3 and above
+except ImportError:
+    import mock  # python < 3.3
 
 
 def my_example_function():
@@ -44,7 +47,8 @@ def test_trace_decorator_py2_no_trx():
 
             result2 = start_child_span_decorator_py2(my_example_function)()
             fake_warning.assert_called_once_with(
-                "No transaction found. Not creating a child span for %s. Please start a Sentry transaction before calling this function.",
+                "Can not create a child span for %s. "
+                "Please start a Sentry transaction before calling this function.",
                 "test_decorator_py2.my_example_function",
             )
             assert result2 == "return_of_sync_function"

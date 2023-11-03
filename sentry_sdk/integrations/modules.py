@@ -18,15 +18,36 @@ if TYPE_CHECKING:
 _installed_modules = None
 
 
+def _normalize_module_name(name):
+    # type: (str) -> str
+    return name.lower()
+
+
 def _generate_installed_modules():
     # type: () -> Iterator[Tuple[str, str]]
     try:
-        import pkg_resources
-    except ImportError:
-        return
+        from importlib import metadata
 
-    for info in pkg_resources.working_set:
-        yield info.key, info.version
+        for dist in metadata.distributions():
+            name = dist.metadata["Name"]
+            # `metadata` values may be `None`, see:
+            # https://github.com/python/cpython/issues/91216
+            # and
+            # https://github.com/python/importlib_metadata/issues/371
+            if name is not None:
+                version = metadata.version(name)
+                if version is not None:
+                    yield _normalize_module_name(name), version
+
+    except ImportError:
+        # < py3.8
+        try:
+            import pkg_resources
+        except ImportError:
+            return
+
+        for info in pkg_resources.working_set:
+            yield _normalize_module_name(info.key), info.version
 
 
 def _get_installed_modules():

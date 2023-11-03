@@ -1,3 +1,4 @@
+from importlib import import_module
 import os
 import uuid
 import random
@@ -17,18 +18,22 @@ from sentry_sdk.utils import (
     logger,
 )
 from sentry_sdk.serializer import serialize
+from sentry_sdk.tracing import trace, has_tracing_enabled
 from sentry_sdk.transport import make_transport
 from sentry_sdk.consts import (
+    DEFAULT_MAX_VALUE_LENGTH,
     DEFAULT_OPTIONS,
     INSTRUMENTER,
     VERSION,
     ClientConstructor,
 )
-from sentry_sdk.integrations import setup_integrations
+from sentry_sdk.integrations import _DEFAULT_INTEGRATIONS, setup_integrations
 from sentry_sdk.utils import ContextVar
 from sentry_sdk.sessions import SessionFlusher
 from sentry_sdk.envelope import Envelope
 from sentry_sdk.profiler import has_profiling_enabled, setup_profiler
+from sentry_sdk.scrubber import EventScrubber
+from sentry_sdk.monitor import Monitor
 
 from sentry_sdk._types import TYPE_CHECKING
 
@@ -37,6 +42,7 @@ if TYPE_CHECKING:
     from typing import Callable
     from typing import Dict
     from typing import Optional
+    from typing import Sequence
 
     from sentry_sdk.scope import Scope
     from sentry_sdk._types import Event, Hint
@@ -81,6 +87,16 @@ def _get_options(*args, **kwargs):
                 rv["include_local_variables"] = value
                 continue
 
+            # Option "request_bodies" was renamed to "max_request_body_size"
+            if key == "request_bodies":
+                msg = (
+                    "Deprecated: The option 'request_bodies' was renamed to 'max_request_body_size'. "
+                    "Please use 'max_request_body_size'. The option 'request_bodies' will be removed in the future."
+                )
+                logger.warning(msg)
+                rv["max_request_body_size"] = value
+                continue
+
             raise TypeError("Unknown option %r" % (key,))
 
         rv[key] = value
@@ -111,7 +127,18 @@ def _get_options(*args, **kwargs):
     if rv["enable_tracing"] is True and rv["traces_sample_rate"] is None:
         rv["traces_sample_rate"] = 1.0
 
+    if rv["event_scrubber"] is None:
+        rv["event_scrubber"] = EventScrubber()
+
     return rv
+
+
+try:
+    # Python 3.6+
+    module_not_found_error = ModuleNotFoundError
+except Exception:
+    # Older Python versions
+    module_not_found_error = ImportError  # type: ignore
 
 
 class _Client(object):
@@ -136,6 +163,52 @@ class _Client(object):
         self.options = state["options"]
         self._init_impl()
 
+    def _setup_instrumentation(self, functions_to_trace):
+        # type: (Sequence[Dict[str, str]]) -> None
+        """
+        Instruments the functions given in the list `functions_to_trace` with the `@sentry_sdk.tracing.trace` decorator.
+        """
+        for function in functions_to_trace:
+            class_name = None
+            function_qualname = function["qualified_name"]
+            module_name, function_name = function_qualname.rsplit(".", 1)
+
+            try:
+                # Try to import module and function
+                # ex: "mymodule.submodule.funcname"
+
+                module_obj = import_module(module_name)
+                function_obj = getattr(module_obj, function_name)
+                setattr(module_obj, function_name, trace(function_obj))
+                logger.debug("Enabled tracing for %s", function_qualname)
+
+            except module_not_found_error:
+                try:
+                    # Try to import a class
+                    # ex: "mymodule.submodule.MyClassName.member_function"
+
+                    module_name, class_name = module_name.rsplit(".", 1)
+                    module_obj = import_module(module_name)
+                    class_obj = getattr(module_obj, class_name)
+                    function_obj = getattr(class_obj, function_name)
+                    setattr(class_obj, function_name, trace(function_obj))
+                    setattr(module_obj, class_name, class_obj)
+                    logger.debug("Enabled tracing for %s", function_qualname)
+
+                except Exception as e:
+                    logger.warning(
+                        "Can not enable tracing for '%s'. (%s) Please check your `functions_to_trace` parameter.",
+                        function_qualname,
+                        e,
+                    )
+
+            except Exception as e:
+                logger.warning(
+                    "Can not enable tracing for '%s'. (%s) Please check your `functions_to_trace` parameter.",
+                    function_qualname,
+                    e,
+                )
+
     def _init_impl(self):
         # type: () -> None
         old_debug = _client_init_debug.get(False)
@@ -149,14 +222,28 @@ class _Client(object):
             _client_init_debug.set(self.options["debug"])
             self.transport = make_transport(self.options)
 
+            self.monitor = None
+            if self.transport:
+                if self.options["enable_backpressure_handling"]:
+                    self.monitor = Monitor(self.transport)
+
             self.session_flusher = SessionFlusher(capture_func=_capture_envelope)
 
-            request_bodies = ("always", "never", "small", "medium")
-            if self.options["request_bodies"] not in request_bodies:
+            max_request_body_size = ("always", "never", "small", "medium")
+            if self.options["max_request_body_size"] not in max_request_body_size:
                 raise ValueError(
-                    "Invalid value for request_bodies. Must be one of {}".format(
-                        request_bodies
+                    "Invalid value for max_request_body_size. Must be one of {}".format(
+                        max_request_body_size
                     )
+                )
+
+            if self.options["_experiments"].get("otel_powered_performance", False):
+                logger.debug(
+                    "[OTel] Enabling experimental OTel-powered performance monitoring."
+                )
+                self.options["instrumenter"] = INSTRUMENTER.OTEL
+                _DEFAULT_INTEGRATIONS.append(
+                    "sentry_sdk.integrations.opentelemetry.OpenTelemetryIntegration",
                 )
 
             self.integrations = setup_integrations(
@@ -171,14 +258,16 @@ class _Client(object):
             SDK_INFO["name"] = sdk_name
             logger.debug("Setting SDK name to '%s'", sdk_name)
 
+            if has_profiling_enabled(self.options):
+                try:
+                    setup_profiler(self.options)
+                except Exception as e:
+                    logger.debug("Can not set up profiler. (%s)", e)
+
         finally:
             _client_init_debug.set(old_debug)
 
-        if has_profiling_enabled(self.options):
-            try:
-                setup_profiler(self.options)
-            except ValueError as e:
-                logger.debug(str(e))
+        self._setup_instrumentation(self.options.get("functions_to_trace", []))
 
     @property
     def dsn(self):
@@ -199,7 +288,7 @@ class _Client(object):
 
         if scope is not None:
             is_transaction = event.get("type") == "transaction"
-            event_ = scope.apply_to_event(event, hint)
+            event_ = scope.apply_to_event(event, hint, self.options)
 
             # one of the event/error processors returned None
             if event_ is None:
@@ -223,7 +312,12 @@ class _Client(object):
                     "values": [
                         {
                             "stacktrace": current_stacktrace(
-                                self.options["include_local_variables"]
+                                include_local_variables=self.options.get(
+                                    "include_local_variables", True
+                                ),
+                                max_value_length=self.options.get(
+                                    "max_value_length", DEFAULT_MAX_VALUE_LENGTH
+                                ),
                             ),
                             "crashed": False,
                             "current": True,
@@ -249,18 +343,26 @@ class _Client(object):
             self.options["project_root"],
         )
 
+        if event is not None:
+            event_scrubber = self.options["event_scrubber"]
+            if event_scrubber and not self.options["send_default_pii"]:
+                event_scrubber.scrub_event(event)
+
         # Postprocess the event here so that annotated types do
         # generally not surface in before_send
         if event is not None:
             event = serialize(
                 event,
-                smart_transaction_trimming=self.options["_experiments"].get(
-                    "smart_transaction_trimming"
-                ),
+                max_request_body_size=self.options.get("max_request_body_size"),
+                max_value_length=self.options.get("max_value_length"),
             )
 
         before_send = self.options["before_send"]
-        if before_send is not None and event.get("type") != "transaction":
+        if (
+            before_send is not None
+            and event is not None
+            and event.get("type") != "transaction"
+        ):
             new_event = None
             with capture_internal_exceptions():
                 new_event = before_send(event, hint or {})
@@ -273,7 +375,11 @@ class _Client(object):
             event = new_event  # type: ignore
 
         before_send_transaction = self.options["before_send_transaction"]
-        if before_send_transaction is not None and event.get("type") == "transaction":
+        if (
+            before_send_transaction is not None
+            and event is not None
+            and event.get("type") == "transaction"
+        ):
             new_event = None
             with capture_internal_exceptions():
                 new_event = before_send_transaction(event, hint or {})
@@ -373,7 +479,7 @@ class _Client(object):
 
         if session.user_agent is None:
             headers = (event.get("request") or {}).get("headers")
-            for (k, v) in iteritems(headers or {}):
+            for k, v in iteritems(headers or {}):
                 if k.lower() == "user-agent":
                     user_agent = v
                     break
@@ -397,6 +503,9 @@ class _Client(object):
         :param event: A ready-made event that can be directly sent to Sentry.
 
         :param hint: Contains metadata about the event that can be read from `before_send`, such as the original exception object or a HTTP request object.
+
+        :param scope: An optional scope to use for determining whether this event
+            should be captured.
 
         :returns: An event ID. May be `None` if there is no DSN set or of if the SDK decided to discard the event for other reasons. In such situations setting `debug=True` on `init()` may help.
         """
@@ -428,24 +537,27 @@ class _Client(object):
             self._update_session_from_event(session, event)
 
         is_transaction = event_opt.get("type") == "transaction"
-
-        if not is_transaction and not self._should_sample_error(event):
-            return None
-
-        attachments = hint.get("attachments")
-
-        dynamic_sampling_context = (
-            event_opt.get("contexts", {})
-            .get("trace", {})
-            .pop("dynamic_sampling_context", {})
-        )
-
         is_checkin = event_opt.get("type") == "check_in"
 
-        # Transactions, events with attachments, and checkins should go to the /envelope/
-        # endpoint.
-        if is_transaction or is_checkin or attachments:
+        if (
+            not is_transaction
+            and not is_checkin
+            and not self._should_sample_error(event)
+        ):
+            return None
 
+        tracing_enabled = has_tracing_enabled(self.options)
+        attachments = hint.get("attachments")
+
+        trace_context = event_opt.get("contexts", {}).get("trace") or {}
+        dynamic_sampling_context = trace_context.pop("dynamic_sampling_context", {})
+
+        # If tracing is enabled all events should go to /envelope endpoint.
+        # If no tracing is enabled only transactions, events with attachments, and checkins should go to the /envelope endpoint.
+        should_use_envelope_endpoint = (
+            tracing_enabled or is_transaction or is_checkin or bool(attachments)
+        )
+        if should_use_envelope_endpoint:
             headers = {
                 "event_id": event_opt["event_id"],
                 "sent_at": format_timestamp(datetime.utcnow()),
@@ -469,9 +581,11 @@ class _Client(object):
                 envelope.add_item(attachment.to_envelope_item())
 
             self.transport.capture_envelope(envelope)
+
         else:
-            # All other events go to the /store/ endpoint.
+            # All other events go to the legacy /store/ endpoint (will be removed in the future).
             self.transport.capture_event(event_opt)
+
         return event_id
 
     def capture_session(
@@ -496,6 +610,8 @@ class _Client(object):
         if self.transport is not None:
             self.flush(timeout=timeout, callback=callback)
             self.session_flusher.kill()
+            if self.monitor:
+                self.monitor.kill()
             self.transport.kill()
             self.transport = None
 

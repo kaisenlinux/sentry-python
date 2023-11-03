@@ -1,3 +1,9 @@
+sentry-python (1.31.0-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 1.31.0 version
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Tue, 31 Oct 2023 23:28:22 +0100
+
 sentry-python (1.17.0-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 1.17.0 version

@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import time
 
 import pytest
 
@@ -51,14 +52,16 @@ def test_processors(sentry_init, capture_events):
 
 def test_auto_enabling_integrations_catches_import_error(sentry_init, caplog):
     caplog.set_level(logging.DEBUG)
-    REDIS = 12  # noqa: N806
+    redis_index = _AUTO_ENABLING_INTEGRATIONS.index(
+        "sentry_sdk.integrations.redis.RedisIntegration"
+    )  # noqa: N806
 
     sentry_init(auto_enabling_integrations=True, debug=True)
 
     for import_string in _AUTO_ENABLING_INTEGRATIONS:
         # Ignore redis in the test case, because it is installed as a
         # dependency for running tests, and therefore always enabled.
-        if _AUTO_ENABLING_INTEGRATIONS[REDIS] == import_string:
+        if _AUTO_ENABLING_INTEGRATIONS[redis_index] == import_string:
             continue
 
         assert any(
@@ -101,10 +104,8 @@ def test_generic_mechanism(sentry_init, capture_events):
         capture_exception()
 
     (event,) = events
-    assert event["exception"]["values"][0]["mechanism"] == {
-        "type": "generic",
-        "handled": True,
-    }
+    assert event["exception"]["values"][0]["mechanism"]["type"] == "generic"
+    assert event["exception"]["values"][0]["mechanism"]["handled"]
 
 
 def test_option_before_send(sentry_init, capture_events):
@@ -618,3 +619,70 @@ def test_event_processor_drop_records_client_report(
 )
 def test_get_sdk_name(installed_integrations, expected_name):
     assert get_sdk_name(installed_integrations) == expected_name
+
+
+def _hello_world(word):
+    return "Hello, {}".format(word)
+
+
+def test_functions_to_trace(sentry_init, capture_events):
+    functions_to_trace = [
+        {"qualified_name": "tests.test_basics._hello_world"},
+        {"qualified_name": "time.sleep"},
+    ]
+
+    sentry_init(
+        traces_sample_rate=1.0,
+        functions_to_trace=functions_to_trace,
+    )
+
+    events = capture_events()
+
+    with start_transaction(name="something"):
+        time.sleep(0)
+
+        for word in ["World", "You"]:
+            _hello_world(word)
+
+    assert len(events) == 1
+
+    (event,) = events
+
+    assert len(event["spans"]) == 3
+    assert event["spans"][0]["description"] == "time.sleep"
+    assert event["spans"][1]["description"] == "tests.test_basics._hello_world"
+    assert event["spans"][2]["description"] == "tests.test_basics._hello_world"
+
+
+class WorldGreeter:
+    def __init__(self, word):
+        self.word = word
+
+    def greet(self, new_word=None):
+        return "Hello, {}".format(new_word if new_word else self.word)
+
+
+def test_functions_to_trace_with_class(sentry_init, capture_events):
+    functions_to_trace = [
+        {"qualified_name": "tests.test_basics.WorldGreeter.greet"},
+    ]
+
+    sentry_init(
+        traces_sample_rate=1.0,
+        functions_to_trace=functions_to_trace,
+    )
+
+    events = capture_events()
+
+    with start_transaction(name="something"):
+        wg = WorldGreeter("World")
+        wg.greet()
+        wg.greet("You")
+
+    assert len(events) == 1
+
+    (event,) = events
+
+    assert len(event["spans"]) == 2
+    assert event["spans"][0]["description"] == "tests.test_basics.WorldGreeter.greet"
+    assert event["spans"][1]["description"] == "tests.test_basics.WorldGreeter.greet"

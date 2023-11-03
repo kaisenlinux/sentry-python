@@ -1,5 +1,6 @@
 import pytest
 from sentry_sdk import capture_message
+from sentry_sdk.consts import SPANDATA
 from sentry_sdk.api import start_transaction
 from sentry_sdk.integrations.redis import RedisIntegration
 
@@ -13,7 +14,6 @@ if hasattr(rediscluster, "StrictRedisCluster"):
 
 @pytest.fixture(autouse=True)
 def monkeypatch_rediscluster_classes(reset_integrations):
-
     try:
         pipeline_cls = rediscluster.pipeline.ClusterPipeline
     except AttributeError:
@@ -42,6 +42,7 @@ def test_rediscluster_basic(rediscluster_cls, sentry_init, capture_events):
         "category": "redis",
         "message": "GET 'foobar'",
         "data": {
+            "db.operation": "GET",
             "redis.key": "foobar",
             "redis.command": "GET",
             "redis.is_cluster": True,
@@ -51,8 +52,21 @@ def test_rediscluster_basic(rediscluster_cls, sentry_init, capture_events):
     }
 
 
-def test_rediscluster_pipeline(sentry_init, capture_events):
-    sentry_init(integrations=[RedisIntegration()], traces_sample_rate=1.0)
+@pytest.mark.parametrize(
+    "send_default_pii, expected_first_ten",
+    [
+        (False, ["GET 'foo'", "SET 'bar' [Filtered]", "SET 'baz' [Filtered]"]),
+        (True, ["GET 'foo'", "SET 'bar' 1", "SET 'baz' 2"]),
+    ],
+)
+def test_rediscluster_pipeline(
+    sentry_init, capture_events, send_default_pii, expected_first_ten
+):
+    sentry_init(
+        integrations=[RedisIntegration()],
+        traces_sample_rate=1.0,
+        send_default_pii=send_default_pii,
+    )
     events = capture_events()
 
     rc = rediscluster.RedisCluster(connection_pool=True)
@@ -70,8 +84,9 @@ def test_rediscluster_pipeline(sentry_init, capture_events):
     assert span["data"] == {
         "redis.commands": {
             "count": 3,
-            "first_ten": ["GET 'foo'", "SET 'bar' 1", "SET 'baz' 2"],
-        }
+            "first_ten": expected_first_ten,
+        },
+        SPANDATA.DB_SYSTEM: "redis",
     }
     assert span["tags"] == {
         "redis.transaction": False,  # For Cluster, this is always False

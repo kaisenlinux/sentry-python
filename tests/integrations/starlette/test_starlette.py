@@ -2,13 +2,16 @@ import asyncio
 import base64
 import functools
 import json
+import logging
 import os
+import re
 import threading
 
 import pytest
 
 from sentry_sdk import last_event_id, capture_exception
 from sentry_sdk.integrations.asgi import SentryAsgiMiddleware
+from sentry_sdk.utils import parse_version
 
 try:
     from unittest import mock  # python 3.3 and above
@@ -30,9 +33,11 @@ from starlette.authentication import (
 )
 from starlette.middleware import Middleware
 from starlette.middleware.authentication import AuthenticationMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.testclient import TestClient
 
-STARLETTE_VERSION = tuple([int(x) for x in starlette.__version__.split(".")])
+
+STARLETTE_VERSION = parse_version(starlette.__version__)
 
 PICTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "photo.jpg")
 
@@ -61,7 +66,6 @@ PARSED_FORM = starlette.datastructures.FormData(
             starlette.datastructures.UploadFile(
                 filename="photo.jpg",
                 file=open(PICTURE, "rb"),
-                content_type="image/jpeg",
             ),
         ),
     ]
@@ -93,7 +97,16 @@ async def _mock_receive(msg):
     return msg
 
 
+from sentry_sdk import Hub
+from starlette.templating import Jinja2Templates
+
+
 def starlette_app_factory(middleware=None, debug=True):
+    template_dir = os.path.join(
+        os.getcwd(), "tests", "integrations", "starlette", "templates"
+    )
+    templates = Jinja2Templates(directory=template_dir)
+
     async def _homepage(request):
         1 / 0
         return starlette.responses.JSONResponse({"status": "ok"})
@@ -125,6 +138,16 @@ def starlette_app_factory(middleware=None, debug=True):
             }
         )
 
+    async def _render_template(request):
+        hub = Hub.current
+        capture_message(hub.get_traceparent() + "\n" + hub.get_baggage())
+
+        template_context = {
+            "request": request,
+            "msg": "Hello Template World!",
+        }
+        return templates.TemplateResponse("trace_meta.html", template_context)
+
     app = starlette.applications.Starlette(
         debug=debug,
         routes=[
@@ -134,6 +157,7 @@ def starlette_app_factory(middleware=None, debug=True):
             starlette.routing.Route("/message/{message_id}", _message_with_id),
             starlette.routing.Route("/sync/thread_ids", _thread_ids_sync),
             starlette.routing.Route("/async/thread_ids", _thread_ids_async),
+            starlette.routing.Route("/render_template", _render_template),
         ],
         middleware=middleware,
     )
@@ -678,9 +702,7 @@ def test_middleware_callback_spans(sentry_init, capture_events):
         },
         {
             "op": "middleware.starlette.send",
-            "description": "_ASGIAdapter.send.<locals>.send"
-            if STARLETTE_VERSION < (0, 21)
-            else "_TestClientTransport.handle_request.<locals>.send",
+            "description": "SentryAsgiMiddleware._run_app.<locals>._sentry_wrapped_send",
             "tags": {"starlette.middleware_name": "ServerErrorMiddleware"},
         },
         {
@@ -695,9 +717,7 @@ def test_middleware_callback_spans(sentry_init, capture_events):
         },
         {
             "op": "middleware.starlette.send",
-            "description": "_ASGIAdapter.send.<locals>.send"
-            if STARLETTE_VERSION < (0, 21)
-            else "_TestClientTransport.handle_request.<locals>.send",
+            "description": "SentryAsgiMiddleware._run_app.<locals>._sentry_wrapped_send",
             "tags": {"starlette.middleware_name": "ServerErrorMiddleware"},
         },
     ]
@@ -771,9 +791,7 @@ def test_middleware_partial_receive_send(sentry_init, capture_events):
         },
         {
             "op": "middleware.starlette.send",
-            "description": "_ASGIAdapter.send.<locals>.send"
-            if STARLETTE_VERSION < (0, 21)
-            else "_TestClientTransport.handle_request.<locals>.send",
+            "description": "SentryAsgiMiddleware._run_app.<locals>._sentry_wrapped_send",
             "tags": {"starlette.middleware_name": "ServerErrorMiddleware"},
         },
         {
@@ -873,3 +891,224 @@ def test_active_thread_id(sentry_init, capture_envelopes, teardown_profiling, en
         transactions = profile.payload.json["transactions"]
         assert len(transactions) == 1
         assert str(data["active"]) == transactions[0]["active_thread_id"]
+
+
+def test_original_request_not_scrubbed(sentry_init, capture_events):
+    sentry_init(integrations=[StarletteIntegration()])
+
+    events = capture_events()
+
+    async def _error(request):
+        logging.critical("Oh no!")
+        assert request.headers["Authorization"] == "Bearer ohno"
+        assert await request.json() == {"password": "ohno"}
+        return starlette.responses.JSONResponse({"status": "Oh no!"})
+
+    app = starlette.applications.Starlette(
+        routes=[
+            starlette.routing.Route("/error", _error, methods=["POST"]),
+        ],
+    )
+
+    client = TestClient(app)
+    client.post(
+        "/error",
+        json={"password": "ohno"},
+        headers={"Authorization": "Bearer ohno"},
+    )
+
+    event = events[0]
+    assert event["request"]["data"] == {"password": "[Filtered]"}
+    assert event["request"]["headers"]["authorization"] == "[Filtered]"
+
+
+@pytest.mark.skipif(STARLETTE_VERSION < (0, 24), reason="Requires Starlette >= 0.24")
+def test_template_tracing_meta(sentry_init, capture_events):
+    sentry_init(
+        auto_enabling_integrations=False,  # Make sure that httpx integration is not added, because it adds tracing information to the starlette test clients request.
+        integrations=[StarletteIntegration()],
+    )
+    events = capture_events()
+
+    app = starlette_app_factory()
+
+    client = TestClient(app)
+    response = client.get("/render_template")
+    assert response.status_code == 200
+
+    rendered_meta = response.text
+    traceparent, baggage = events[0]["message"].split("\n")
+    assert traceparent != ""
+    assert baggage != ""
+
+    match = re.match(
+        r'^<meta name="sentry-trace" content="([^\"]*)"><meta name="baggage" content="([^\"]*)">',
+        rendered_meta,
+    )
+    assert match is not None
+    assert match.group(1) == traceparent
+
+    # Python 2 does not preserve sort order
+    rendered_baggage = match.group(2)
+    assert sorted(rendered_baggage.split(",")) == sorted(baggage.split(","))
+
+
+@pytest.mark.parametrize(
+    "request_url,transaction_style,expected_transaction_name,expected_transaction_source",
+    [
+        (
+            "/message/123456",
+            "endpoint",
+            "tests.integrations.starlette.test_starlette.starlette_app_factory.<locals>._message_with_id",
+            "component",
+        ),
+        (
+            "/message/123456",
+            "url",
+            "/message/{message_id}",
+            "route",
+        ),
+    ],
+)
+def test_transaction_name(
+    sentry_init,
+    request_url,
+    transaction_style,
+    expected_transaction_name,
+    expected_transaction_source,
+    capture_envelopes,
+):
+    """
+    Tests that the transaction name is something meaningful.
+    """
+    sentry_init(
+        auto_enabling_integrations=False,  # Make sure that httpx integration is not added, because it adds tracing information to the starlette test clients request.
+        integrations=[StarletteIntegration(transaction_style=transaction_style)],
+        traces_sample_rate=1.0,
+        debug=True,
+    )
+
+    envelopes = capture_envelopes()
+
+    app = starlette_app_factory()
+    client = TestClient(app)
+    client.get(request_url)
+
+    (_, transaction_envelope) = envelopes
+    transaction_event = transaction_envelope.get_transaction_event()
+
+    assert transaction_event["transaction"] == expected_transaction_name
+    assert (
+        transaction_event["transaction_info"]["source"] == expected_transaction_source
+    )
+
+
+@pytest.mark.parametrize(
+    "request_url,transaction_style,expected_transaction_name,expected_transaction_source",
+    [
+        (
+            "/message/123456",
+            "endpoint",
+            "http://testserver/message/123456",
+            "url",
+        ),
+        (
+            "/message/123456",
+            "url",
+            "http://testserver/message/123456",
+            "url",
+        ),
+    ],
+)
+def test_transaction_name_in_traces_sampler(
+    sentry_init,
+    request_url,
+    transaction_style,
+    expected_transaction_name,
+    expected_transaction_source,
+):
+    """
+    Tests that a custom traces_sampler has a meaningful transaction name.
+    In this case the URL or endpoint, because we do not have the route yet.
+    """
+
+    def dummy_traces_sampler(sampling_context):
+        assert (
+            sampling_context["transaction_context"]["name"] == expected_transaction_name
+        )
+        assert (
+            sampling_context["transaction_context"]["source"]
+            == expected_transaction_source
+        )
+
+    sentry_init(
+        auto_enabling_integrations=False,  # Make sure that httpx integration is not added, because it adds tracing information to the starlette test clients request.
+        integrations=[StarletteIntegration(transaction_style=transaction_style)],
+        traces_sampler=dummy_traces_sampler,
+        traces_sample_rate=1.0,
+        debug=True,
+    )
+
+    app = starlette_app_factory()
+    client = TestClient(app)
+    client.get(request_url)
+
+
+@pytest.mark.parametrize(
+    "request_url,transaction_style,expected_transaction_name,expected_transaction_source",
+    [
+        (
+            "/message/123456",
+            "endpoint",
+            "starlette.middleware.trustedhost.TrustedHostMiddleware",
+            "component",
+        ),
+        (
+            "/message/123456",
+            "url",
+            "http://testserver/message/123456",
+            "url",
+        ),
+    ],
+)
+def test_transaction_name_in_middleware(
+    sentry_init,
+    request_url,
+    transaction_style,
+    expected_transaction_name,
+    expected_transaction_source,
+    capture_envelopes,
+):
+    """
+    Tests that the transaction name is something meaningful.
+    """
+    sentry_init(
+        auto_enabling_integrations=False,  # Make sure that httpx integration is not added, because it adds tracing information to the starlette test clients request.
+        integrations=[
+            StarletteIntegration(transaction_style=transaction_style),
+        ],
+        traces_sample_rate=1.0,
+        debug=True,
+    )
+
+    envelopes = capture_envelopes()
+
+    middleware = [
+        Middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=["example.com", "*.example.com"],
+        ),
+    ]
+
+    app = starlette_app_factory(middleware=middleware)
+    client = TestClient(app)
+    client.get(request_url)
+
+    (transaction_envelope,) = envelopes
+    transaction_event = transaction_envelope.get_transaction_event()
+
+    assert transaction_event["contexts"]["response"]["status_code"] == 400
+    assert transaction_event["transaction"] == expected_transaction_name
+    assert (
+        transaction_event["transaction_info"]["source"] == expected_transaction_source
+    )

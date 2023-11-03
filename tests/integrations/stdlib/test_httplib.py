@@ -23,7 +23,7 @@ except ImportError:
 
 
 from sentry_sdk import capture_message, start_transaction
-from sentry_sdk.consts import MATCH_ALL
+from sentry_sdk.consts import MATCH_ALL, SPANDATA
 from sentry_sdk.tracing import Transaction
 from sentry_sdk.integrations.stdlib import StdlibIntegration
 
@@ -48,11 +48,11 @@ def test_crumb_capture(sentry_init, capture_events):
     assert crumb["category"] == "httplib"
     assert crumb["data"] == {
         "url": url,
-        "method": "GET",
-        "status_code": 200,
+        SPANDATA.HTTP_METHOD: "GET",
+        SPANDATA.HTTP_STATUS_CODE: 200,
         "reason": "OK",
-        "http.fragment": "",
-        "http.query": "",
+        SPANDATA.HTTP_FRAGMENT: "",
+        SPANDATA.HTTP_QUERY: "",
     }
 
 
@@ -75,16 +75,16 @@ def test_crumb_capture_hint(sentry_init, capture_events):
     assert crumb["category"] == "httplib"
     assert crumb["data"] == {
         "url": url,
-        "method": "GET",
-        "status_code": 200,
+        SPANDATA.HTTP_METHOD: "GET",
+        SPANDATA.HTTP_STATUS_CODE: 200,
         "reason": "OK",
         "extra": "foo",
-        "http.fragment": "",
-        "http.query": "",
+        SPANDATA.HTTP_FRAGMENT: "",
+        SPANDATA.HTTP_QUERY: "",
     }
 
 
-def test_empty_realurl(sentry_init, capture_events):
+def test_empty_realurl(sentry_init):
     """
     Ensure that after using sentry_sdk.init you can putrequest a
     None url.
@@ -114,7 +114,7 @@ def test_httplib_misuse(sentry_init, capture_events, request):
 
     conn.request("GET", "/200")
 
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         # This raises an exception, because we didn't call `getresponse` for
         # the previous request yet.
         #
@@ -133,11 +133,11 @@ def test_httplib_misuse(sentry_init, capture_events, request):
     assert crumb["category"] == "httplib"
     assert crumb["data"] == {
         "url": "http://localhost:{}/200".format(PORT),
-        "method": "GET",
-        "status_code": 200,
+        SPANDATA.HTTP_METHOD: "GET",
+        SPANDATA.HTTP_STATUS_CODE: 200,
         "reason": "OK",
-        "http.fragment": "",
-        "http.query": "",
+        SPANDATA.HTTP_FRAGMENT: "",
+        SPANDATA.HTTP_QUERY: "",
     }
 
 
@@ -165,7 +165,6 @@ def test_outgoing_trace_headers(sentry_init, monkeypatch):
         op="greeting.sniff",
         trace_id="12312012123120121231201212312012",
     ) as transaction:
-
         HTTPSConnection("www.squirrelchasers.com").request("GET", "/top-chasers")
 
         (request_str,) = mock_send.call_args[0]
@@ -229,6 +228,7 @@ def test_outgoing_trace_headers_head_sdk(sentry_init, monkeypatch):
         expected_outgoing_baggage_items = [
             "sentry-trace_id=%s" % transaction.trace_id,
             "sentry-sample_rate=0.5",
+            "sentry-sampled=%s" % "true" if transaction.sampled else "false",
             "sentry-release=foo",
             "sentry-environment=production",
         ]
@@ -326,7 +326,6 @@ def test_option_trace_propagation_targets(
         op="greeting.sniff",
         trace_id="12312012123120121231201212312012",
     ) as transaction:
-
         HTTPSConnection(host).request("GET", path)
 
         (request_str,) = mock_send.call_args[0]

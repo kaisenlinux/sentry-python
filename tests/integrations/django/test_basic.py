@@ -1,11 +1,14 @@
 from __future__ import absolute_import
 
 import json
+import os
+import random
+import re
 import pytest
-import pytest_django
 from functools import partial
 
 from werkzeug.test import Client
+
 from django import VERSION as DJANGO_VERSION
 from django.contrib.auth.models import User
 from django.core.management import execute_from_command_line
@@ -18,33 +21,50 @@ except ImportError:
 
 from sentry_sdk._compat import PY2, PY310
 from sentry_sdk import capture_message, capture_exception, configure_scope
+from sentry_sdk.consts import SPANDATA
 from sentry_sdk.integrations.django import DjangoIntegration
 from sentry_sdk.integrations.django.signals_handlers import _get_receiver_name
+from sentry_sdk.integrations.django.caching import _get_span_description
 from sentry_sdk.integrations.executing import ExecutingIntegration
-
 from tests.integrations.django.myapp.wsgi import application
+from tests.integrations.django.utils import pytest_mark_django_db_decorator
 
-# Hack to prevent from experimental feature introduced in version `4.3.0` in `pytest-django` that
-# requires explicit database allow from failing the test
-pytest_mark_django_db_decorator = partial(pytest.mark.django_db)
-try:
-    pytest_version = tuple(map(int, pytest_django.__version__.split(".")))
-    if pytest_version > (4, 2, 0):
-        pytest_mark_django_db_decorator = partial(
-            pytest.mark.django_db, databases="__all__"
-        )
-except ValueError:
-    if "dev" in pytest_django.__version__:
-        pytest_mark_django_db_decorator = partial(
-            pytest.mark.django_db, databases="__all__"
-        )
-except AttributeError:
-    pass
+DJANGO_VERSION = DJANGO_VERSION[:2]
 
 
 @pytest.fixture
 def client():
     return Client(application)
+
+
+@pytest.fixture
+def use_django_caching(settings):
+    settings.CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "unique-snowflake-%s" % random.randint(1, 1000000),
+        }
+    }
+
+
+@pytest.fixture
+def use_django_caching_with_middlewares(settings):
+    settings.CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "unique-snowflake-%s" % random.randint(1, 1000000),
+        }
+    }
+    if hasattr(settings, "MIDDLEWARE"):
+        middleware = settings.MIDDLEWARE
+    elif hasattr(settings, "MIDDLEWARE_CLASSES"):
+        middleware = settings.MIDDLEWARE_CLASSES
+    else:
+        middleware = None
+
+    if middleware is not None:
+        middleware.insert(0, "django.middleware.cache.UpdateCacheMiddleware")
+        middleware.append("django.middleware.cache.FetchFromCacheMiddleware")
 
 
 def test_view_exceptions(sentry_init, client, capture_exceptions, capture_events):
@@ -142,6 +162,112 @@ def test_transaction_with_class_view(sentry_init, client, capture_events):
         event["transaction"] == "tests.integrations.django.myapp.views.ClassBasedView"
     )
     assert event["message"] == "hi"
+
+
+def test_has_trace_if_performance_enabled(sentry_init, client, capture_events):
+    sentry_init(
+        integrations=[DjangoIntegration()],
+        traces_sample_rate=1.0,
+    )
+    events = capture_events()
+    client.head(reverse("view_exc_with_msg"))
+
+    (msg_event, error_event, transaction_event) = events
+
+    assert msg_event["contexts"]["trace"]
+    assert "trace_id" in msg_event["contexts"]["trace"]
+
+    assert error_event["contexts"]["trace"]
+    assert "trace_id" in error_event["contexts"]["trace"]
+
+    assert transaction_event["contexts"]["trace"]
+    assert "trace_id" in transaction_event["contexts"]["trace"]
+
+    assert (
+        msg_event["contexts"]["trace"]["trace_id"]
+        == error_event["contexts"]["trace"]["trace_id"]
+        == transaction_event["contexts"]["trace"]["trace_id"]
+    )
+
+
+def test_has_trace_if_performance_disabled(sentry_init, client, capture_events):
+    sentry_init(
+        integrations=[DjangoIntegration()],
+    )
+    events = capture_events()
+    client.head(reverse("view_exc_with_msg"))
+
+    (msg_event, error_event) = events
+
+    assert msg_event["contexts"]["trace"]
+    assert "trace_id" in msg_event["contexts"]["trace"]
+
+    assert error_event["contexts"]["trace"]
+    assert "trace_id" in error_event["contexts"]["trace"]
+
+    assert (
+        msg_event["contexts"]["trace"]["trace_id"]
+        == error_event["contexts"]["trace"]["trace_id"]
+    )
+
+
+def test_trace_from_headers_if_performance_enabled(sentry_init, client, capture_events):
+    sentry_init(
+        integrations=[DjangoIntegration()],
+        traces_sample_rate=1.0,
+    )
+
+    events = capture_events()
+
+    trace_id = "582b43a4192642f0b136d5159a501701"
+    sentry_trace_header = "{}-{}-{}".format(trace_id, "6e8f22c393e68f19", 1)
+
+    client.head(
+        reverse("view_exc_with_msg"), headers={"sentry-trace": sentry_trace_header}
+    )
+
+    (msg_event, error_event, transaction_event) = events
+
+    assert msg_event["contexts"]["trace"]
+    assert "trace_id" in msg_event["contexts"]["trace"]
+
+    assert error_event["contexts"]["trace"]
+    assert "trace_id" in error_event["contexts"]["trace"]
+
+    assert transaction_event["contexts"]["trace"]
+    assert "trace_id" in transaction_event["contexts"]["trace"]
+
+    assert msg_event["contexts"]["trace"]["trace_id"] == trace_id
+    assert error_event["contexts"]["trace"]["trace_id"] == trace_id
+    assert transaction_event["contexts"]["trace"]["trace_id"] == trace_id
+
+
+def test_trace_from_headers_if_performance_disabled(
+    sentry_init, client, capture_events
+):
+    sentry_init(
+        integrations=[DjangoIntegration()],
+    )
+
+    events = capture_events()
+
+    trace_id = "582b43a4192642f0b136d5159a501701"
+    sentry_trace_header = "{}-{}-{}".format(trace_id, "6e8f22c393e68f19", 1)
+
+    client.head(
+        reverse("view_exc_with_msg"), headers={"sentry-trace": sentry_trace_header}
+    )
+
+    (msg_event, error_event) = events
+
+    assert msg_event["contexts"]["trace"]
+    assert "trace_id" in msg_event["contexts"]["trace"]
+
+    assert error_event["contexts"]["trace"]
+    assert "trace_id" in error_event["contexts"]["trace"]
+
+    assert msg_event["contexts"]["trace"]["trace_id"] == trace_id
+    assert error_event["contexts"]["trace"]["trace_id"] == trace_id
 
 
 @pytest.mark.forked
@@ -447,14 +573,19 @@ def test_django_connect_trace(sentry_init, client, capture_events, render_span_t
     content, status, headers = client.get(reverse("postgres_select"))
     assert status == "200 OK"
 
-    assert '- op="db": description="connect"' in render_span_tree(events[0])
+    (event,) = events
+
+    for span in event["spans"]:
+        if span.get("op") == "db":
+            data = span.get("data")
+            assert data.get(SPANDATA.DB_SYSTEM) == "postgresql"
+
+    assert '- op="db": description="connect"' in render_span_tree(event)
 
 
 @pytest.mark.forked
 @pytest_mark_django_db_decorator(transaction=True)
-def test_django_connect_breadcrumbs(
-    sentry_init, client, capture_events, render_span_tree
-):
+def test_django_connect_breadcrumbs(sentry_init, capture_events):
     """
     Verify we record a breadcrumb when opening a new database.
     """
@@ -486,6 +617,43 @@ def test_django_connect_breadcrumbs(
         {"message": "connect", "category": "query", "type": "default"},
         {"message": "select 1", "category": "query", "data": {}, "type": "default"},
     ]
+
+
+@pytest.mark.forked
+@pytest_mark_django_db_decorator(transaction=True)
+def test_db_connection_span_data(sentry_init, client, capture_events):
+    sentry_init(
+        integrations=[DjangoIntegration()],
+        send_default_pii=True,
+        traces_sample_rate=1.0,
+    )
+    from django.db import connections
+
+    if "postgres" not in connections:
+        pytest.skip("postgres tests disabled")
+
+    # trigger Django to open a new connection by marking the existing one as None.
+    connections["postgres"].connection = None
+
+    events = capture_events()
+
+    content, status, headers = client.get(reverse("postgres_select"))
+    assert status == "200 OK"
+
+    (event,) = events
+
+    for span in event["spans"]:
+        if span.get("op") == "db":
+            data = span.get("data")
+            assert data.get(SPANDATA.DB_SYSTEM) == "postgresql"
+            assert (
+                data.get(SPANDATA.DB_NAME)
+                == connections["postgres"].get_connection_params()["database"]
+            )
+            assert data.get(SPANDATA.SERVER_ADDRESS) == os.environ.get(
+                "SENTRY_PYTHON_TEST_POSTGRES_HOST", "localhost"
+            )
+            assert data.get(SPANDATA.SERVER_PORT) == "5432"
 
 
 @pytest.mark.parametrize(
@@ -573,6 +741,29 @@ def test_read_request(sentry_init, client, capture_events):
     (event,) = events
 
     assert "data" not in event["request"]
+
+
+def test_template_tracing_meta(sentry_init, client, capture_events):
+    sentry_init(integrations=[DjangoIntegration()])
+    events = capture_events()
+
+    content, _, _ = client.get(reverse("template_test3"))
+    rendered_meta = b"".join(content).decode("utf-8")
+
+    traceparent, baggage = events[0]["message"].split("\n")
+    assert traceparent != ""
+    assert baggage != ""
+
+    match = re.match(
+        r'^<meta name="sentry-trace" content="([^\"]*)"><meta name="baggage" content="([^\"]*)">\n',
+        rendered_meta,
+    )
+    assert match is not None
+    assert match.group(1) == traceparent
+
+    # Python 2 does not preserve sort order
+    rendered_baggage = match.group(2)
+    assert sorted(rendered_baggage.split(",")) == sorted(baggage.split(","))
 
 
 @pytest.mark.parametrize("with_executing_integration", [[], [ExecutingIntegration()]])
@@ -898,3 +1089,240 @@ def test_get_receiver_name():
         assert name == "functools.partial(<function " + a_partial.func.__name__ + ">)"
     else:
         assert name == "partial(<function " + a_partial.func.__name__ + ">)"
+
+
+@pytest.mark.forked
+@pytest_mark_django_db_decorator()
+@pytest.mark.skipif(DJANGO_VERSION < (1, 9), reason="Requires Django >= 1.9")
+def test_cache_spans_disabled_middleware(
+    sentry_init, client, capture_events, use_django_caching_with_middlewares
+):
+    sentry_init(
+        integrations=[
+            DjangoIntegration(
+                cache_spans=False,
+                middleware_spans=False,
+                signals_spans=False,
+            )
+        ],
+        traces_sample_rate=1.0,
+    )
+    events = capture_events()
+
+    client.get(reverse("not_cached_view"))
+    client.get(reverse("not_cached_view"))
+
+    (first_event, second_event) = events
+    assert len(first_event["spans"]) == 0
+    assert len(second_event["spans"]) == 0
+
+
+@pytest.mark.forked
+@pytest_mark_django_db_decorator()
+@pytest.mark.skipif(DJANGO_VERSION < (1, 9), reason="Requires Django >= 1.9")
+def test_cache_spans_disabled_decorator(
+    sentry_init, client, capture_events, use_django_caching
+):
+    sentry_init(
+        integrations=[
+            DjangoIntegration(
+                cache_spans=False,
+                middleware_spans=False,
+                signals_spans=False,
+            )
+        ],
+        traces_sample_rate=1.0,
+    )
+    events = capture_events()
+
+    client.get(reverse("cached_view"))
+    client.get(reverse("cached_view"))
+
+    (first_event, second_event) = events
+    assert len(first_event["spans"]) == 0
+    assert len(second_event["spans"]) == 0
+
+
+@pytest.mark.forked
+@pytest_mark_django_db_decorator()
+@pytest.mark.skipif(DJANGO_VERSION < (1, 9), reason="Requires Django >= 1.9")
+def test_cache_spans_disabled_templatetag(
+    sentry_init, client, capture_events, use_django_caching
+):
+    sentry_init(
+        integrations=[
+            DjangoIntegration(
+                cache_spans=False,
+                middleware_spans=False,
+                signals_spans=False,
+            )
+        ],
+        traces_sample_rate=1.0,
+    )
+    events = capture_events()
+
+    client.get(reverse("view_with_cached_template_fragment"))
+    client.get(reverse("view_with_cached_template_fragment"))
+
+    (first_event, second_event) = events
+    assert len(first_event["spans"]) == 0
+    assert len(second_event["spans"]) == 0
+
+
+@pytest.mark.forked
+@pytest_mark_django_db_decorator()
+@pytest.mark.skipif(DJANGO_VERSION < (1, 9), reason="Requires Django >= 1.9")
+def test_cache_spans_middleware(
+    sentry_init, client, capture_events, use_django_caching_with_middlewares
+):
+    sentry_init(
+        integrations=[
+            DjangoIntegration(
+                cache_spans=True,
+                middleware_spans=False,
+                signals_spans=False,
+            )
+        ],
+        traces_sample_rate=1.0,
+    )
+
+    client.application.load_middleware()
+    events = capture_events()
+
+    client.get(reverse("not_cached_view"))
+    client.get(reverse("not_cached_view"))
+
+    (first_event, second_event) = events
+    assert len(first_event["spans"]) == 1
+    assert first_event["spans"][0]["op"] == "cache.get_item"
+    assert first_event["spans"][0]["description"].startswith(
+        "get views.decorators.cache.cache_header."
+    )
+    assert first_event["spans"][0]["data"] == {"cache.hit": False}
+
+    assert len(second_event["spans"]) == 2
+    assert second_event["spans"][0]["op"] == "cache.get_item"
+    assert second_event["spans"][0]["description"].startswith(
+        "get views.decorators.cache.cache_header."
+    )
+    assert second_event["spans"][0]["data"] == {"cache.hit": False}
+
+    assert second_event["spans"][1]["op"] == "cache.get_item"
+    assert second_event["spans"][1]["description"].startswith(
+        "get views.decorators.cache.cache_page."
+    )
+    assert second_event["spans"][1]["data"]["cache.hit"]
+    assert "cache.item_size" in second_event["spans"][1]["data"]
+
+
+@pytest.mark.forked
+@pytest_mark_django_db_decorator()
+@pytest.mark.skipif(DJANGO_VERSION < (1, 9), reason="Requires Django >= 1.9")
+def test_cache_spans_decorator(sentry_init, client, capture_events, use_django_caching):
+    sentry_init(
+        integrations=[
+            DjangoIntegration(
+                cache_spans=True,
+                middleware_spans=False,
+                signals_spans=False,
+            )
+        ],
+        traces_sample_rate=1.0,
+    )
+    events = capture_events()
+
+    client.get(reverse("cached_view"))
+    client.get(reverse("cached_view"))
+
+    (first_event, second_event) = events
+    assert len(first_event["spans"]) == 1
+    assert first_event["spans"][0]["op"] == "cache.get_item"
+    assert first_event["spans"][0]["description"].startswith(
+        "get views.decorators.cache.cache_header."
+    )
+    assert first_event["spans"][0]["data"] == {"cache.hit": False}
+
+    assert len(second_event["spans"]) == 2
+    assert second_event["spans"][0]["op"] == "cache.get_item"
+    assert second_event["spans"][0]["description"].startswith(
+        "get views.decorators.cache.cache_header."
+    )
+    assert second_event["spans"][0]["data"] == {"cache.hit": False}
+
+    assert second_event["spans"][1]["op"] == "cache.get_item"
+    assert second_event["spans"][1]["description"].startswith(
+        "get views.decorators.cache.cache_page."
+    )
+    assert second_event["spans"][1]["data"]["cache.hit"]
+    assert "cache.item_size" in second_event["spans"][1]["data"]
+
+
+@pytest.mark.forked
+@pytest_mark_django_db_decorator()
+@pytest.mark.skipif(DJANGO_VERSION < (1, 9), reason="Requires Django >= 1.9")
+def test_cache_spans_templatetag(
+    sentry_init, client, capture_events, use_django_caching
+):
+    sentry_init(
+        integrations=[
+            DjangoIntegration(
+                cache_spans=True,
+                middleware_spans=False,
+                signals_spans=False,
+            )
+        ],
+        traces_sample_rate=1.0,
+    )
+    events = capture_events()
+
+    client.get(reverse("view_with_cached_template_fragment"))
+    client.get(reverse("view_with_cached_template_fragment"))
+
+    (first_event, second_event) = events
+    assert len(first_event["spans"]) == 1
+    assert first_event["spans"][0]["op"] == "cache.get_item"
+    assert first_event["spans"][0]["description"].startswith(
+        "get template.cache.some_identifier."
+    )
+    assert first_event["spans"][0]["data"] == {"cache.hit": False}
+
+    assert len(second_event["spans"]) == 1
+    assert second_event["spans"][0]["op"] == "cache.get_item"
+    assert second_event["spans"][0]["description"].startswith(
+        "get template.cache.some_identifier."
+    )
+    assert second_event["spans"][0]["data"]["cache.hit"]
+    assert "cache.item_size" in second_event["spans"][0]["data"]
+
+
+@pytest.mark.parametrize(
+    "method_name, args, kwargs, expected_description",
+    [
+        ("get", None, None, "get "),
+        ("get", [], {}, "get "),
+        ("get", ["bla", "blub", "foo"], {}, "get bla"),
+        (
+            "get_many",
+            [["bla 1", "bla 2", "bla 3"], "blub", "foo"],
+            {},
+            "get_many ['bla 1', 'bla 2', 'bla 3']",
+        ),
+        (
+            "get_many",
+            [["bla 1", "bla 2", "bla 3"], "blub", "foo"],
+            {"key": "bar"},
+            "get_many ['bla 1', 'bla 2', 'bla 3']",
+        ),
+        ("get", [], {"key": "bar"}, "get bar"),
+        (
+            "get",
+            "something",
+            {},
+            "get s",
+        ),  # this should never happen, just making sure that we are not raising an exception in that case.
+    ],
+)
+def test_cache_spans_get_span_description(
+    method_name, args, kwargs, expected_description
+):
+    assert _get_span_description(method_name, args, kwargs) == expected_description

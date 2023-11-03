@@ -1,5 +1,8 @@
 from sentry_sdk._types import TYPE_CHECKING
 
+# up top to prevent circular import due to integration import
+DEFAULT_MAX_VALUE_LENGTH = 1024
+
 if TYPE_CHECKING:
     import sentry_sdk
 
@@ -33,18 +36,25 @@ if TYPE_CHECKING:
         {
             "max_spans": Optional[int],
             "record_sql_params": Optional[bool],
-            "smart_transaction_trimming": Optional[bool],
-            # TODO: Remvoe these 2 profiling related experiments
+            # TODO: Remove these 2 profiling related experiments
             "profiles_sample_rate": Optional[float],
             "profiler_mode": Optional[ProfilerMode],
+            "otel_powered_performance": Optional[bool],
         },
         total=False,
     )
 
 DEFAULT_QUEUE_SIZE = 100
 DEFAULT_MAX_BREADCRUMBS = 100
-
 MATCH_ALL = r".*"
+
+FALSE_VALUES = [
+    "false",
+    "no",
+    "off",
+    "n",
+    "0",
+]
 
 
 class INSTRUMENTER:
@@ -52,13 +62,111 @@ class INSTRUMENTER:
     OTEL = "otel"
 
 
+class SPANDATA:
+    """
+    Additional information describing the type of the span.
+    See: https://develop.sentry.dev/sdk/performance/span-data-conventions/
+    """
+
+    DB_NAME = "db.name"
+    """
+    The name of the database being accessed. For commands that switch the database, this should be set to the target database (even if the command fails).
+    Example: myDatabase
+    """
+
+    DB_USER = "db.user"
+    """
+    The name of the database user used for connecting to the database.
+    See: https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/database.md
+    Example: my_user
+    """
+
+    DB_OPERATION = "db.operation"
+    """
+    The name of the operation being executed, e.g. the MongoDB command name such as findAndModify, or the SQL keyword.
+    See: https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/database.md
+    Example: findAndModify, HMSET, SELECT
+    """
+
+    DB_SYSTEM = "db.system"
+    """
+    An identifier for the database management system (DBMS) product being used.
+    See: https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/database.md
+    Example: postgresql
+    """
+
+    CACHE_HIT = "cache.hit"
+    """
+    A boolean indicating whether the requested data was found in the cache.
+    Example: true
+    """
+
+    CACHE_ITEM_SIZE = "cache.item_size"
+    """
+    The size of the requested data in bytes.
+    Example: 58
+    """
+
+    HTTP_QUERY = "http.query"
+    """
+    The Query string present in the URL.
+    Example: ?foo=bar&bar=baz
+    """
+
+    HTTP_FRAGMENT = "http.fragment"
+    """
+    The Fragments present in the URL.
+    Example: #foo=bar
+    """
+
+    HTTP_METHOD = "http.method"
+    """
+    The HTTP method used.
+    Example: GET
+    """
+
+    HTTP_STATUS_CODE = "http.response.status_code"
+    """
+    The HTTP status code as an integer.
+    Example: 418
+    """
+
+    SERVER_ADDRESS = "server.address"
+    """
+    Name of the database host.
+    Example: example.com
+    """
+
+    SERVER_PORT = "server.port"
+    """
+    Logical server port number
+    Example: 80; 8080; 443
+    """
+
+    SERVER_SOCKET_ADDRESS = "server.socket.address"
+    """
+    Physical server IP address or Unix socket address.
+    Example: 10.5.3.2
+    """
+
+    SERVER_SOCKET_PORT = "server.socket.port"
+    """
+    Physical server port.
+    Recommended: If different than server.port.
+    Example: 16456
+    """
+
+
 class OP:
+    CACHE_GET_ITEM = "cache.get_item"
     DB = "db"
     DB_REDIS = "db.redis"
     EVENT_DJANGO = "event.django"
     FUNCTION = "function"
     FUNCTION_AWS = "function.aws"
     FUNCTION_GCP = "function.gcp"
+    GRPC_CLIENT = "grpc.client"
+    GRPC_SERVER = "grpc.server"
     HTTP_CLIENT = "http.client"
     HTTP_CLIENT_STREAM = "http.client.stream"
     HTTP_SERVER = "http.server"
@@ -83,6 +191,8 @@ class OP:
     VIEW_RENDER = "view.render"
     VIEW_RESPONSE_RENDER = "view.response.render"
     WEBSOCKET_SERVER = "websocket.server"
+    SOCKET_CONNECTION = "socket.connection"
+    SOCKET_DNS = "socket.dns"
 
 
 # This type exists to trick mypy and PyCharm into thinking `init` and `Client`
@@ -108,7 +218,7 @@ class ClientConstructor(object):
         http_proxy=None,  # type: Optional[str]
         https_proxy=None,  # type: Optional[str]
         ignore_errors=[],  # type: Sequence[Union[type, str]]  # noqa: B006
-        request_bodies="medium",  # type: str
+        max_request_body_size="medium",  # type: str
         before_send=None,  # type: Optional[EventProcessor]
         before_breadcrumb=None,  # type: Optional[BreadcrumbProcessor]
         debug=False,  # type: bool
@@ -130,9 +240,14 @@ class ClientConstructor(object):
         project_root=None,  # type: Optional[str]
         enable_tracing=None,  # type: Optional[bool]
         include_local_variables=True,  # type: Optional[bool]
+        include_source_context=True,  # type: Optional[bool]
         trace_propagation_targets=[  # noqa: B006
             MATCH_ALL
         ],  # type: Optional[Sequence[str]]
+        functions_to_trace=[],  # type: Sequence[Dict[str, str]]  # noqa: B006
+        event_scrubber=None,  # type: Optional[sentry_sdk.scrubber.EventScrubber]
+        max_value_length=DEFAULT_MAX_VALUE_LENGTH,  # type: int
+        enable_backpressure_handling=True,  # type: bool
     ):
         # type: (...) -> None
         pass
@@ -156,4 +271,4 @@ DEFAULT_OPTIONS = _get_default_options()
 del _get_default_options
 
 
-VERSION = "1.17.0"
+VERSION = "1.31.0"
