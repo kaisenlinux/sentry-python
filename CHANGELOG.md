@@ -1,5 +1,134 @@
 # Changelog
 
+## 1.34.0
+
+### Various fixes & improvements
+- Added Python 3.12 support (#2471, #2483)
+- Handle missing `connection_kwargs` in `patch_redis_client` (#2482) by @szokeasaurusrex
+- Run common test suite on Python 3.12 (#2479) by @sentrivana
+
+## 1.33.1
+
+### Various fixes & improvements
+
+- Make parse_version work in utils.py itself. (#2474) by @antonpirker
+
+## 1.33.0
+
+### Various fixes & improvements
+
+- New: Added `error_sampler` option (#2456) by @szokeasaurusrex
+- Python 3.12: Detect interpreter in shutdown state on thread spawn (#2468) by @mitsuhiko
+- Patch eventlet under Sentry SDK (#2464) by @szokeasaurusrex
+- Mitigate CPU spikes when sending lots of events with lots of data (#2449) by @antonpirker
+- Make `debug` option also configurable via environment (#2450) by @antonpirker
+- Make sure `get_dsn_parameters` is an actual function (#2441) by @sentrivana
+- Bump pytest-localserver, add compat comment (#2448) by @sentrivana
+- AWS Lambda: Update compatible runtimes for AWS Lambda layer (#2453) by @antonpirker
+- AWS Lambda: Load AWS Lambda secrets in Github CI (#2153) by @antonpirker
+- Redis: Connection attributes in `redis` database spans (#2398) by @antonpirker
+- Falcon: Falcon integration checks response status before reporting error (#2465) by @szokeasaurusrex
+- Quart: Support Quart 0.19 onwards (#2403) by @pgjones
+- Sanic: Sanic integration initial version (#2419) by @szokeasaurusrex
+- Django: Fix parsing of Django `path` patterns (#2452) by @sentrivana
+- Django: Add Django 4.2 to test suite (#2462) by @sentrivana
+- Polish changelog (#2434) by @sentrivana
+- Update CONTRIBUTING.md (#2443) by @krishvsoni
+- Update README.md (#2435) by @sentrivana
+
+## 1.32.0
+
+### Various fixes & improvements
+
+- **New:** Error monitoring for some of the most popular Python GraphQL libraries:
+  - Add [GQL GraphQL integration](https://docs.sentry.io/platforms/python/integrations/gql/) (#2368) by @szokeasaurusrex
+
+    Usage:
+
+    ```python
+      import sentry_sdk
+      from sentry_sdk.integrations.gql import GQLIntegration
+
+      sentry_sdk.init(
+          dsn='___PUBLIC_DSN___',
+          integrations=[
+              GQLIntegration(),
+          ],
+      )
+    ```
+
+  - Add [Graphene GraphQL error integration](https://docs.sentry.io/platforms/python/integrations/graphene/) (#2389) by @sentrivana
+
+    Usage:
+
+    ```python
+      import sentry_sdk
+      from sentry_sdk.integrations.graphene import GrapheneIntegration
+
+      sentry_sdk.init(
+          dsn='___PUBLIC_DSN___',
+          integrations=[
+              GrapheneIntegration(),
+          ],
+      )
+    ```
+
+  - Add [Strawberry GraphQL error & tracing integration](https://docs.sentry.io/platforms/python/integrations/strawberry/) (#2393) by @sentrivana
+
+    Usage:
+
+    ```python
+      import sentry_sdk
+      from sentry_sdk.integrations.strawberry import StrawberryIntegration
+
+      sentry_sdk.init(
+          dsn='___PUBLIC_DSN___',
+          integrations=[
+              # make sure to set async_execution to False if you're executing
+              # GraphQL queries synchronously
+              StrawberryIntegration(async_execution=True),
+          ],
+          traces_sample_rate=1.0,
+      )
+    ```
+
+  - Add [Ariadne GraphQL error integration](https://docs.sentry.io/platforms/python/integrations/ariadne/) (#2387) by @sentrivana
+
+    Usage:
+
+    ```python
+      import sentry_sdk
+      from sentry_sdk.integrations.ariadne import AriadneIntegration
+
+      sentry_sdk.init(
+          dsn='___PUBLIC_DSN___',
+          integrations=[
+              AriadneIntegration(),
+          ],
+      )
+    ```
+
+- Capture multiple named groups again (#2432) by @sentrivana
+- Don't fail when upstream scheme is unusual (#2371) by @vanschelven
+- Support new RQ version (#2405) by @antonpirker
+- Remove `utcnow`, `utcfromtimestamp` deprecated in Python 3.12 (#2415) by @rmad17
+- Add `trace` to `__all__` in top-level `__init__.py` (#2401) by @lobsterkatie
+- Move minimetrics code to the SDK (#2385) by @mitsuhiko
+- Add configurable compression levels (#2382) by @mitsuhiko
+- Shift flushing by up to a rollup window (#2396) by @mitsuhiko
+- Make a consistent noop flush behavior (#2428) by @mitsuhiko
+- Stronger recursion protection (#2426) by @mitsuhiko
+- Remove `OpenTelemetryIntegration` from `__init__.py` (#2379) by @sentrivana
+- Update API docs (#2397) by @antonpirker
+- Pin some test requirements because new majors break our tests (#2404) by @antonpirker
+- Run more `requests`, `celery`, `falcon` tests (#2414) by @sentrivana
+- Move `importorskip`s in tests to `__init__.py` files (#2412) by @sentrivana
+- Fix `mypy` errors (#2433) by @sentrivana
+- Fix pre-commit issues (#2424) by @bukzor-sentryio
+- Update [CONTRIBUTING.md](https://github.com/getsentry/sentry-python/blob/master/CONTRIBUTING.md) (#2411) by @sentrivana
+- Bump `sphinx` from 7.2.5 to 7.2.6 (#2378) by @dependabot
+- [Experimental] Add explain plan to DB spans (#2315) by @antonpirker
+
 ## 1.31.0
 
 ### Various fixes & improvements
