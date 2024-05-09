@@ -1,5 +1,122 @@
 # Changelog
 
+## 1.39.2
+
+### Various fixes & improvements
+
+- Fix timestamp in transaction created by OTel (#2627) by @antonpirker
+- Fix relative path in DB query source  (#2624) by @antonpirker
+- Run more CI checks on 2.0 branch (#2625) by @sentrivana
+- Fix tracing `TypeError` for static and class methods (#2559) by @szokeasaurusrex
+- Fix missing `ctx` in Arq integration (#2600) by @ivanovart
+- Change `data_category` from `check_in` to `monitor` (#2598) by @sentrivana
+
+## 1.39.1
+
+### Various fixes & improvements
+
+- Fix psycopg2 detection in the Django integration (#2593) by @sentrivana
+- Filter out empty string releases (#2591) by @sentrivana
+- Fixed local var not present when there is an error in a user's `error_sampler` function (#2511) by @antonpirker
+- Fixed typing in `aiohttp` (#2590) by @antonpirker
+
+## 1.39.0
+
+### Various fixes & improvements
+
+- Add support for cluster clients from Redis SDK (#2394) by @md384
+- Improve location reporting for timer metrics (#2552) by @mitsuhiko
+- Fix Celery `TypeError` with no-argument `apply_async` (#2575) by @szokeasaurusrex
+- Fix Lambda integration with EventBridge source (#2546) by @davidcroda
+- Add max tries to Spotlight (#2571) by @hazAT
+- Handle `os.path.devnull` access issues (#2579) by @sentrivana
+- Change `code.filepath` frame picking logic (#2568) by @sentrivana
+- Trigger AWS Lambda tests on label (#2538) by @sentrivana
+- Run permissions step on pull_request_target but not push (#2548) by @sentrivana
+- Hash AWS Lambda test functions based on current revision (#2557) by @sentrivana
+- Update Django version in tests (#2562) by @sentrivana
+- Make metrics tests non-flaky (#2572) by @antonpirker
+
+## 1.38.0
+
+### Various fixes & improvements
+
+- Only add trace context to checkins and do not run `event_processors` for checkins (#2536) by @antonpirker
+- Metric span summaries (#2522) by @mitsuhiko
+- Add source context to code locations (#2539) by @jan-auer
+- Use in-app filepath instead of absolute path (#2541) by @antonpirker
+- Switch to `jinja2` for generating CI yamls (#2534) by @sentrivana
+
+## 1.37.1
+
+### Various fixes & improvements
+
+- Fix `NameError` on `parse_version` with eventlet (#2532) by @sentrivana
+- build(deps): bump checkouts/data-schemas from `68def1e` to `e9f7d58` (#2501) by @dependabot
+
+## 1.37.0
+
+### Various fixes & improvements
+
+- Move installed modules code to utils (#2429) by @sentrivana
+
+    Note: We moved the internal function `_get_installed_modules` from `sentry_sdk.integrations.modules` to `sentry_sdk.utils`.
+    So if you use this function you have to update your imports
+
+- Add code locations for metrics (#2526) by @jan-auer
+- Add query source to DB spans (#2521) by @antonpirker
+- Send events to Spotlight sidecar (#2524) by @HazAT
+- Run integration tests with newest `pytest` (#2518) by @sentrivana
+- Bring tests up to date (#2512) by @sentrivana
+- Fix: Prevent global var from being discarded at shutdown (#2530) by @antonpirker
+- Fix: Scope transaction source not being updated in scope.span setter (#2519) by @sl0thentr0py
+
+## 1.36.0
+
+### Various fixes & improvements
+
+- Django: Support Django 5.0 (#2490) by @sentrivana
+- Django: Handling ASGI body in the right way. (#2513) by @antonpirker
+- Flask: Test with Flask 3.0 (#2506) by @sentrivana
+- Celery: Do not create a span when task is triggered by Celery Beat (#2510) by @antonpirker
+- Redis: Ensure `RedisIntegration` is disabled, unless `redis` is installed (#2504) by @szokeasaurusrex
+- Quart: Fix Quart integration for Quart 0.19.4  (#2516) by @antonpirker
+- gRPC: Make async gRPC less noisy (#2507) by @jyggen
+
+## 1.35.0
+
+### Various fixes & improvements
+
+- **Updated gRPC integration:** Asyncio interceptors and easier setup (#2369) by @fdellekart
+
+  Our gRPC integration now instruments incoming unary-unary grpc requests and outgoing unary-unary, unary-stream grpc requests using grpcio channels. Everything works now for sync and async code.
+
+  Before this release you had to add Sentry interceptors by hand to your gRPC code, now the only thing you need to do is adding the `GRPCIntegration` to you `sentry_sdk_init()` call. (See [documentation](https://docs.sentry.io/platforms/python/integrations/grpc/) for more information):
+
+  ```python
+  import sentry_sdk
+  from sentry_sdk.integrations.grpc import GRPCIntegration
+
+  sentry_sdk.init(
+      dsn="___PUBLIC_DSN___",
+      enable_tracing=True,
+      integrations=[
+          GRPCIntegration(),
+      ],
+  )
+  ```
+  The old way still works, but we strongly encourage you to update your code to the way described above.
+
+- Python 3.12: Replace deprecated datetime functions (#2502) by @sentrivana
+- Metrics: Unify datetime format (#2409) by @mitsuhiko
+- Celery: Set correct data in `check_in`s (#2500) by @antonpirker
+- Celery: Read timezone for Crons monitors from `celery_schedule` if existing (#2497) by @antonpirker
+- Django: Removing redundant code in Django tests (#2491) by @vagi8
+- Django: Make reading the request body work in Django ASGI apps. (#2495) by @antonpirker
+- FastAPI: Use wraps on fastapi request call wrapper (#2476) by @nkaras
+- Fix: Probe for psycopg2 and psycopg3 parameters function. (#2492) by @antonpirker
+- Fix: Remove unnecessary TYPE_CHECKING alias (#2467) by @rafrafek
+
 ## 1.34.0
 
 ### Various fixes & improvements

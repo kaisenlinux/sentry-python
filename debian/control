@@ -3,7 +3,7 @@ Section: python
 Priority: optional
 XSBC-Original-Maintainer: Debian Python Modules Team <team+python-modules@tracker.debian.org>
 Maintainer: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
-Build-Depends: debhelper,
+Build-Depends: debhelper-compat (= 13),
                dh-python,
                python3-all,
                python3-blinker,
@@ -18,7 +18,7 @@ Build-Depends: debhelper,
                python3-pytest-xdist,
                python3-urllib3,
                python3-werkzeug
-Standards-Version: 4.5.1
+Standards-Version: 4.7.0
 Homepage: https://github.com/getsentry/sentry-python
 Vcs-Browser: https://gitlab.com/kaisenlinux/packages/sentry-python
 Vcs-Git: https://gitlab.com/kaisenlinux/packages/sentry-python.git

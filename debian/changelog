@@ -1,3 +1,10 @@
+sentry-python (1.39.2-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 1.39.2 release
+  * Drop the debian/compat file
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Thu, 09 May 2024 14:16:02 +0200
+
 sentry-python (1.34.0-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 1.34.0 version
