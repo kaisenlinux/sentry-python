@@ -1,5 +1,3 @@
-import sys
-
 from collections import Counter
 
 import pytest
@@ -9,11 +7,6 @@ from sentry_sdk.integrations._asgi_common import _get_ip, _get_headers
 from sentry_sdk.integrations.asgi import SentryAsgiMiddleware, _looks_like_asgi3
 
 from async_asgi_testclient import TestClient
-
-
-minimum_python_36 = pytest.mark.skipif(
-    sys.version_info < (3, 6), reason="ASGI is only supported in Python >= 3.6"
-)
 
 
 @pytest.fixture
@@ -133,7 +126,31 @@ def asgi3_ws_app():
     return app
 
 
-@minimum_python_36
+@pytest.fixture
+def asgi3_custom_transaction_app():
+
+    async def app(scope, receive, send):
+        sentry_sdk.get_current_scope().set_transaction_name("foobar", source="custom")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    [b"content-type", b"text/plain"],
+                ],
+            }
+        )
+
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b"Hello, world!",
+            }
+        )
+
+    return app
+
+
 def test_invalid_transaction_style(asgi3_app):
     with pytest.raises(ValueError) as exp:
         SentryAsgiMiddleware(asgi3_app, transaction_style="URL")
@@ -144,7 +161,6 @@ def test_invalid_transaction_style(asgi3_app):
     )
 
 
-@minimum_python_36
 @pytest.mark.asyncio
 async def test_capture_transaction(
     sentry_init,
@@ -176,7 +192,6 @@ async def test_capture_transaction(
     }
 
 
-@minimum_python_36
 @pytest.mark.asyncio
 async def test_capture_transaction_with_error(
     sentry_init,
@@ -214,7 +229,6 @@ async def test_capture_transaction_with_error(
     assert transaction_event["request"] == error_event["request"]
 
 
-@minimum_python_36
 @pytest.mark.asyncio
 async def test_has_trace_if_performance_enabled(
     sentry_init,
@@ -247,7 +261,6 @@ async def test_has_trace_if_performance_enabled(
     )
 
 
-@minimum_python_36
 @pytest.mark.asyncio
 async def test_has_trace_if_performance_disabled(
     sentry_init,
@@ -271,7 +284,6 @@ async def test_has_trace_if_performance_disabled(
     assert "trace_id" in error_event["contexts"]["trace"]
 
 
-@minimum_python_36
 @pytest.mark.asyncio
 async def test_trace_from_headers_if_performance_enabled(
     sentry_init,
@@ -305,7 +317,6 @@ async def test_trace_from_headers_if_performance_enabled(
     assert transaction_event["contexts"]["trace"]["trace_id"] == trace_id
 
 
-@minimum_python_36
 @pytest.mark.asyncio
 async def test_trace_from_headers_if_performance_disabled(
     sentry_init,
@@ -334,10 +345,9 @@ async def test_trace_from_headers_if_performance_disabled(
     assert error_event["contexts"]["trace"]["trace_id"] == trace_id
 
 
-@minimum_python_36
 @pytest.mark.asyncio
 async def test_websocket(sentry_init, asgi3_ws_app, capture_events, request):
-    sentry_init(debug=True, send_default_pii=True)
+    sentry_init(send_default_pii=True)
 
     events = capture_events()
 
@@ -367,7 +377,6 @@ async def test_websocket(sentry_init, asgi3_ws_app, capture_events, request):
     assert exc["value"] == "Oh no"
 
 
-@minimum_python_36
 @pytest.mark.asyncio
 async def test_auto_session_tracking_with_aggregates(
     sentry_init, asgi3_app, capture_envelopes
@@ -406,7 +415,6 @@ async def test_auto_session_tracking_with_aggregates(
     assert len(session_aggregates) == 1
 
 
-@minimum_python_36
 @pytest.mark.parametrize(
     "url,transaction_style,expected_transaction,expected_source",
     [
@@ -470,7 +478,6 @@ class MockAsgi3App(MockAsgi2App):
         pass
 
 
-@minimum_python_36
 def test_looks_like_asgi3(asgi3_app):
     # branch: inspect.isclass(app)
     assert _looks_like_asgi3(MockAsgi3App)
@@ -487,7 +494,6 @@ def test_looks_like_asgi3(asgi3_app):
     assert not _looks_like_asgi3(asgi2)
 
 
-@minimum_python_36
 def test_get_ip_x_forwarded_for():
     headers = [
         (b"x-forwarded-for", b"8.8.8.8"),
@@ -525,7 +531,6 @@ def test_get_ip_x_forwarded_for():
     assert ip == "5.5.5.5"
 
 
-@minimum_python_36
 def test_get_ip_x_real_ip():
     headers = [
         (b"x-real-ip", b"10.10.10.10"),
@@ -550,7 +555,6 @@ def test_get_ip_x_real_ip():
     assert ip == "8.8.8.8"
 
 
-@minimum_python_36
 def test_get_ip():
     # if now headers are provided the ip is taken from the client.
     headers = []
@@ -584,7 +588,6 @@ def test_get_ip():
     assert ip == "10.10.10.10"
 
 
-@minimum_python_36
 def test_get_headers():
     headers = [
         (b"x-real-ip", b"10.10.10.10"),
@@ -602,7 +605,6 @@ def test_get_headers():
     }
 
 
-@minimum_python_36
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "request_url,transaction_style,expected_transaction_name,expected_transaction_source",
@@ -635,7 +637,6 @@ async def test_transaction_name(
     """
     sentry_init(
         traces_sample_rate=1.0,
-        debug=True,
     )
 
     envelopes = capture_envelopes()
@@ -654,7 +655,6 @@ async def test_transaction_name(
     )
 
 
-@minimum_python_36
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "request_url, transaction_style,expected_transaction_name,expected_transaction_source",
@@ -698,10 +698,26 @@ async def test_transaction_name_in_traces_sampler(
     sentry_init(
         traces_sampler=dummy_traces_sampler,
         traces_sample_rate=1.0,
-        debug=True,
     )
 
     app = SentryAsgiMiddleware(asgi3_app, transaction_style=transaction_style)
 
     async with TestClient(app) as client:
         await client.get(request_url)
+
+
+@pytest.mark.asyncio
+async def test_custom_transaction_name(
+    sentry_init, asgi3_custom_transaction_app, capture_events
+):
+    sentry_init(traces_sample_rate=1.0)
+    events = capture_events()
+    app = SentryAsgiMiddleware(asgi3_custom_transaction_app)
+
+    async with TestClient(app) as client:
+        await client.get("/test")
+
+    (transaction_event,) = events
+    assert transaction_event["type"] == "transaction"
+    assert transaction_event["transaction"] == "foobar"
+    assert transaction_event["transaction_info"] == {"source": "custom"}

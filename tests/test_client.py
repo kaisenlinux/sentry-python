@@ -1,12 +1,16 @@
-# coding: utf-8
 import os
 import json
-import pytest
 import subprocess
 import sys
 import time
-
+from collections import Counter, defaultdict
+from collections.abc import Mapping
 from textwrap import dedent
+from unittest import mock
+
+import pytest
+
+import sentry_sdk
 from sentry_sdk import (
     Hub,
     Client,
@@ -15,45 +19,36 @@ from sentry_sdk import (
     capture_message,
     capture_exception,
     capture_event,
-    start_transaction,
     set_tag,
 )
+from sentry_sdk.spotlight import DEFAULT_SPOTLIGHT_URL
+from sentry_sdk.utils import capture_internal_exception
 from sentry_sdk.integrations.executing import ExecutingIntegration
 from sentry_sdk.transport import Transport
-from sentry_sdk._compat import reraise, text_type, PY2
-from sentry_sdk.utils import HAS_CHAINED_EXCEPTIONS
-from sentry_sdk.utils import logger
 from sentry_sdk.serializer import MAX_DATABAG_BREADTH
 from sentry_sdk.consts import DEFAULT_MAX_BREADCRUMBS, DEFAULT_MAX_VALUE_LENGTH
-from sentry_sdk._types import TYPE_CHECKING
+
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any, Optional, Union
     from sentry_sdk._types import Event
 
-try:
-    from unittest import mock  # python 3.3 and above
-except ImportError:
-    import mock  # python < 3.3
 
-if PY2:
-    # Importing ABCs from collections is deprecated, and will stop working in 3.8
-    # https://github.com/python/cpython/blob/master/Lib/collections/__init__.py#L49
-    from collections import Mapping
-else:
-    # New in 3.3
-    # https://docs.python.org/3/library/collections.abc.html
-    from collections.abc import Mapping
+maximum_python_312 = pytest.mark.skipif(
+    sys.version_info > (3, 12),
+    reason="Since Python 3.13, `FrameLocalsProxy` skips items of `locals()` that have non-`str` keys; this is a CPython implementation detail: https://github.com/python/cpython/blame/7b413952e817ae87bfda2ac85dd84d30a6ce743b/Objects/frameobject.c#L148",
+)
 
 
-class EventCapturedError(Exception):
+class EnvelopeCapturedError(Exception):
     pass
 
 
 class _TestTransport(Transport):
-    def capture_event(self, event):
-        raise EventCapturedError(event)
+    def capture_envelope(self, envelope):
+        raise EnvelopeCapturedError(envelope)
 
 
 def test_transport_option(monkeypatch):
@@ -66,8 +61,8 @@ def test_transport_option(monkeypatch):
     assert Client().dsn is None
 
     monkeypatch.setenv("SENTRY_DSN", dsn)
-    transport = Transport({"dsn": dsn2})
-    assert text_type(transport.parsed_dsn) == dsn2
+    transport = _TestTransport({"dsn": dsn2})
+    assert str(transport.parsed_dsn) == dsn2
     assert str(Client(transport=transport).dsn) == dsn
 
 
@@ -251,7 +246,10 @@ def test_transport_option(monkeypatch):
         },
     ],
 )
-def test_proxy(monkeypatch, testcase):
+@pytest.mark.parametrize(
+    "http2", [True, False] if sys.version_info >= (3, 8) else [False]
+)
+def test_proxy(monkeypatch, testcase, http2):
     if testcase["env_http_proxy"] is not None:
         monkeypatch.setenv("HTTP_PROXY", testcase["env_http_proxy"])
     if testcase["env_https_proxy"] is not None:
@@ -260,6 +258,9 @@ def test_proxy(monkeypatch, testcase):
         monkeypatch.setenv("NO_PROXY", testcase["env_no_proxy"])
 
     kwargs = {}
+
+    if http2:
+        kwargs["_experiments"] = {"transport_http2": True}
 
     if testcase["arg_http_proxy"] is not None:
         kwargs["http_proxy"] = testcase["arg_http_proxy"]
@@ -270,13 +271,31 @@ def test_proxy(monkeypatch, testcase):
 
     client = Client(testcase["dsn"], **kwargs)
 
+    proxy = getattr(
+        client.transport._pool,
+        "proxy",
+        getattr(client.transport._pool, "_proxy_url", None),
+    )
     if testcase["expected_proxy_scheme"] is None:
-        assert client.transport._pool.proxy is None
+        assert proxy is None
     else:
-        assert client.transport._pool.proxy.scheme == testcase["expected_proxy_scheme"]
+        scheme = (
+            proxy.scheme.decode("ascii")
+            if isinstance(proxy.scheme, bytes)
+            else proxy.scheme
+        )
+        assert scheme == testcase["expected_proxy_scheme"]
 
         if testcase.get("arg_proxy_headers") is not None:
-            assert client.transport._pool.proxy_headers == testcase["arg_proxy_headers"]
+            proxy_headers = (
+                dict(
+                    (k.decode("ascii"), v.decode("ascii"))
+                    for k, v in client.transport._pool._proxy_headers
+                )
+                if http2
+                else client.transport._pool.proxy_headers
+            )
+            assert proxy_headers == testcase["arg_proxy_headers"]
 
 
 @pytest.mark.parametrize(
@@ -286,60 +305,66 @@ def test_proxy(monkeypatch, testcase):
             "dsn": "https://foo@sentry.io/123",
             "arg_http_proxy": "http://localhost/123",
             "arg_https_proxy": None,
-            "expected_proxy_class": "<class 'urllib3.poolmanager.ProxyManager'>",
+            "should_be_socks_proxy": False,
         },
         {
             "dsn": "https://foo@sentry.io/123",
             "arg_http_proxy": "socks4a://localhost/123",
             "arg_https_proxy": None,
-            "expected_proxy_class": "<class 'urllib3.contrib.socks.SOCKSProxyManager'>",
+            "should_be_socks_proxy": True,
         },
         {
             "dsn": "https://foo@sentry.io/123",
             "arg_http_proxy": "socks4://localhost/123",
             "arg_https_proxy": None,
-            "expected_proxy_class": "<class 'urllib3.contrib.socks.SOCKSProxyManager'>",
+            "should_be_socks_proxy": True,
         },
         {
             "dsn": "https://foo@sentry.io/123",
             "arg_http_proxy": "socks5h://localhost/123",
             "arg_https_proxy": None,
-            "expected_proxy_class": "<class 'urllib3.contrib.socks.SOCKSProxyManager'>",
+            "should_be_socks_proxy": True,
         },
         {
             "dsn": "https://foo@sentry.io/123",
             "arg_http_proxy": "socks5://localhost/123",
             "arg_https_proxy": None,
-            "expected_proxy_class": "<class 'urllib3.contrib.socks.SOCKSProxyManager'>",
+            "should_be_socks_proxy": True,
         },
         {
             "dsn": "https://foo@sentry.io/123",
             "arg_http_proxy": None,
             "arg_https_proxy": "socks4a://localhost/123",
-            "expected_proxy_class": "<class 'urllib3.contrib.socks.SOCKSProxyManager'>",
+            "should_be_socks_proxy": True,
         },
         {
             "dsn": "https://foo@sentry.io/123",
             "arg_http_proxy": None,
             "arg_https_proxy": "socks4://localhost/123",
-            "expected_proxy_class": "<class 'urllib3.contrib.socks.SOCKSProxyManager'>",
+            "should_be_socks_proxy": True,
         },
         {
             "dsn": "https://foo@sentry.io/123",
             "arg_http_proxy": None,
             "arg_https_proxy": "socks5h://localhost/123",
-            "expected_proxy_class": "<class 'urllib3.contrib.socks.SOCKSProxyManager'>",
+            "should_be_socks_proxy": True,
         },
         {
             "dsn": "https://foo@sentry.io/123",
             "arg_http_proxy": None,
             "arg_https_proxy": "socks5://localhost/123",
-            "expected_proxy_class": "<class 'urllib3.contrib.socks.SOCKSProxyManager'>",
+            "should_be_socks_proxy": True,
         },
     ],
 )
-def test_socks_proxy(testcase):
+@pytest.mark.parametrize(
+    "http2", [True, False] if sys.version_info >= (3, 8) else [False]
+)
+def test_socks_proxy(testcase, http2):
     kwargs = {}
+
+    if http2:
+        kwargs["_experiments"] = {"transport_http2": True}
 
     if testcase["arg_http_proxy"] is not None:
         kwargs["http_proxy"] = testcase["arg_http_proxy"]
@@ -347,7 +372,12 @@ def test_socks_proxy(testcase):
         kwargs["https_proxy"] = testcase["arg_https_proxy"]
 
     client = Client(testcase["dsn"], **kwargs)
-    assert str(type(client.transport._pool)) == testcase["expected_proxy_class"]
+    assert ("socks" in str(type(client.transport._pool)).lower()) == testcase[
+        "should_be_socks_proxy"
+    ], (
+        f"Expected {kwargs} to result in SOCKS == {testcase['should_be_socks_proxy']}"
+        f"but got {str(type(client.transport._pool))}"
+    )
 
 
 def test_simple_transport(sentry_init):
@@ -358,14 +388,11 @@ def test_simple_transport(sentry_init):
 
 
 def test_ignore_errors(sentry_init, capture_events):
+    sentry_init(ignore_errors=[ZeroDivisionError])
+    events = capture_events()
+
     class MyDivisionError(ZeroDivisionError):
         pass
-
-    def raise_it(exc_info):
-        reraise(*exc_info)
-
-    sentry_init(ignore_errors=[ZeroDivisionError], transport=_TestTransport())
-    Hub.current._capture_internal_exception = raise_it
 
     def e(exc):
         try:
@@ -375,61 +402,10 @@ def test_ignore_errors(sentry_init, capture_events):
 
     e(ZeroDivisionError())
     e(MyDivisionError())
-    pytest.raises(EventCapturedError, lambda: e(ValueError()))
+    e(ValueError())
 
-
-def test_with_locals_deprecation_enabled(sentry_init):
-    with mock.patch.object(logger, "warning", mock.Mock()) as fake_warning:
-        sentry_init(with_locals=True)
-
-        client = Hub.current.client
-        assert "with_locals" not in client.options
-        assert "include_local_variables" in client.options
-        assert client.options["include_local_variables"]
-
-        fake_warning.assert_called_once_with(
-            "Deprecated: The option 'with_locals' was renamed to 'include_local_variables'. Please use 'include_local_variables'. The option 'with_locals' will be removed in the future."
-        )
-
-
-def test_with_locals_deprecation_disabled(sentry_init):
-    with mock.patch.object(logger, "warning", mock.Mock()) as fake_warning:
-        sentry_init(with_locals=False)
-
-        client = Hub.current.client
-        assert "with_locals" not in client.options
-        assert "include_local_variables" in client.options
-        assert not client.options["include_local_variables"]
-
-        fake_warning.assert_called_once_with(
-            "Deprecated: The option 'with_locals' was renamed to 'include_local_variables'. Please use 'include_local_variables'. The option 'with_locals' will be removed in the future."
-        )
-
-
-def test_include_local_variables_deprecation(sentry_init):
-    with mock.patch.object(logger, "warning", mock.Mock()) as fake_warning:
-        sentry_init(include_local_variables=False)
-
-        client = Hub.current.client
-        assert "with_locals" not in client.options
-        assert "include_local_variables" in client.options
-        assert not client.options["include_local_variables"]
-
-        fake_warning.assert_not_called()
-
-
-def test_request_bodies_deprecation(sentry_init):
-    with mock.patch.object(logger, "warning", mock.Mock()) as fake_warning:
-        sentry_init(request_bodies="small")
-
-        client = Hub.current.client
-        assert "request_bodies" not in client.options
-        assert "max_request_body_size" in client.options
-        assert client.options["max_request_body_size"] == "small"
-
-        fake_warning.assert_called_once_with(
-            "Deprecated: The option 'request_bodies' was renamed to 'max_request_body_size'. Please use 'max_request_body_size'. The option 'request_bodies' will be removed in the future."
-        )
+    assert len(events) == 1
+    assert events[0]["exception"]["values"][0]["type"] == "ValueError"
 
 
 def test_include_local_variables_enabled(sentry_init, capture_events):
@@ -587,12 +563,22 @@ def test_attach_stacktrace_disabled(sentry_init, capture_events):
 
 def test_capture_event_works(sentry_init):
     sentry_init(transport=_TestTransport())
-    pytest.raises(EventCapturedError, lambda: capture_event({}))
-    pytest.raises(EventCapturedError, lambda: capture_event({}))
+    pytest.raises(EnvelopeCapturedError, lambda: capture_event({}))
+    pytest.raises(EnvelopeCapturedError, lambda: capture_event({}))
 
 
 @pytest.mark.parametrize("num_messages", [10, 20])
-def test_atexit(tmpdir, monkeypatch, num_messages):
+@pytest.mark.parametrize(
+    "http2", [True, False] if sys.version_info >= (3, 8) else [False]
+)
+def test_atexit(tmpdir, monkeypatch, num_messages, http2):
+    if http2:
+        options = '_experiments={"transport_http2": True}'
+        transport = "Http2Transport"
+    else:
+        options = ""
+        transport = "HttpTransport"
+
     app = tmpdir.join("app.py")
     app.write(
         dedent(
@@ -600,17 +586,19 @@ def test_atexit(tmpdir, monkeypatch, num_messages):
     import time
     from sentry_sdk import init, transport, capture_message
 
-    def send_event(self, event):
+    def capture_envelope(self, envelope):
         time.sleep(0.1)
-        print(event["message"])
+        event = envelope.get_event() or dict()
+        message = event.get("message", "")
+        print(message)
 
-    transport.HttpTransport._send_event = send_event
-    init("http://foobar@localhost/123", shutdown_timeout={num_messages})
+    transport.{transport}.capture_envelope = capture_envelope
+    init("http://foobar@localhost/123", shutdown_timeout={num_messages}, {options})
 
     for _ in range({num_messages}):
         capture_message("HI")
     """.format(
-                num_messages=num_messages
+                transport=transport, options=options, num_messages=num_messages
             )
         )
     )
@@ -625,8 +613,14 @@ def test_atexit(tmpdir, monkeypatch, num_messages):
     assert output.count(b"HI") == num_messages
 
 
-def test_configure_scope_available(sentry_init, request, monkeypatch):
-    # Test that scope is configured if client is configured
+def test_configure_scope_available(
+    sentry_init, request, monkeypatch, suppress_deprecation_warnings
+):
+    """
+    Test that scope is configured if client is configured
+
+    This test can be removed once configure_scope and the Hub are removed.
+    """
     sentry_init()
 
     with configure_scope() as scope:
@@ -648,7 +642,7 @@ def test_configure_scope_available(sentry_init, request, monkeypatch):
 def test_client_debug_option_enabled(sentry_init, caplog):
     sentry_init(debug=True)
 
-    Hub.current._capture_internal_exception((ValueError, ValueError("OK"), None))
+    capture_internal_exception((ValueError, ValueError("OK"), None))
     assert "OK" in caplog.text
 
 
@@ -658,10 +652,13 @@ def test_client_debug_option_disabled(with_client, sentry_init, caplog):
     if with_client:
         sentry_init()
 
-    Hub.current._capture_internal_exception((ValueError, ValueError("OK"), None))
+    capture_internal_exception((ValueError, ValueError("OK"), None))
     assert "OK" not in caplog.text
 
 
+@pytest.mark.skip(
+    reason="New behavior in SDK 2.0: You have a scope before init and add data to it."
+)
 def test_scope_initialized_before_client(sentry_init, capture_events):
     """
     This is a consequence of how configure_scope() works. We must
@@ -683,9 +680,7 @@ def test_scope_initialized_before_client(sentry_init, capture_events):
 def test_weird_chars(sentry_init, capture_events):
     sentry_init()
     events = capture_events()
-    # fmt: off
-    capture_message(u"föö".encode("latin1"))
-    # fmt: on
+    capture_message("föö".encode("latin1"))
     (event,) = events
     assert json.loads(json.dumps(event)) == event
 
@@ -732,14 +727,13 @@ def test_cyclic_data(sentry_init, capture_events):
     sentry_init()
     events = capture_events()
 
-    with configure_scope() as scope:
-        data = {}
-        data["is_cyclic"] = data
+    data = {}
+    data["is_cyclic"] = data
 
-        other_data = ""
-        data["not_cyclic"] = other_data
-        data["not_cyclic2"] = other_data
-        scope.set_extra("foo", data)
+    other_data = ""
+    data["not_cyclic"] = other_data
+    data["not_cyclic2"] = other_data
+    sentry_sdk.get_isolation_scope().set_extra("foo", data)
 
     capture_message("hi")
     (event,) = events
@@ -810,7 +804,6 @@ def test_databag_breadth_stripping(sentry_init, capture_events, benchmark):
         assert len(json.dumps(event)) < 10000
 
 
-@pytest.mark.skipif(not HAS_CHAINED_EXCEPTIONS, reason="Only works on 3.3+")
 def test_chained_exceptions(sentry_init, capture_events):
     sentry_init()
     events = capture_events()
@@ -905,7 +898,7 @@ def test_object_sends_exception(sentry_init, capture_events):
     sentry_init()
     events = capture_events()
 
-    class C(object):
+    class C:
         def __repr__(self):
             try:
                 1 / 0
@@ -942,6 +935,7 @@ def test_errno_errors(sentry_init, capture_events):
     assert exception["mechanism"]["meta"]["errno"]["number"] == 69
 
 
+@maximum_python_312
 def test_non_string_variables(sentry_init, capture_events):
     """There is some extremely terrible code in the wild that
     inserts non-strings as variable names into `locals()`."""
@@ -973,7 +967,7 @@ def test_dict_changed_during_iteration(sentry_init, capture_events):
     sentry_init(send_default_pii=True)
     events = capture_events()
 
-    class TooSmartClass(object):
+    class TooSmartClass:
         def __init__(self, environ):
             self.environ = environ
 
@@ -997,6 +991,39 @@ def test_dict_changed_during_iteration(sentry_init, capture_events):
     assert frame["vars"]["environ"] == {"a": "<This is me>"}
 
 
+def test_custom_repr_on_vars(sentry_init, capture_events):
+    class Foo:
+        pass
+
+    class Fail:
+        pass
+
+    def custom_repr(value):
+        if isinstance(value, Foo):
+            return "custom repr"
+        elif isinstance(value, Fail):
+            raise ValueError("oops")
+        else:
+            return None
+
+    sentry_init(custom_repr=custom_repr)
+    events = capture_events()
+
+    try:
+        my_vars = {"foo": Foo(), "fail": Fail(), "normal": 42}
+        1 / 0
+    except ZeroDivisionError:
+        capture_exception()
+
+    (event,) = events
+    (exception,) = event["exception"]["values"]
+    (frame,) = exception["stacktrace"]["frames"]
+    my_vars = frame["vars"]["my_vars"]
+    assert my_vars["foo"] == "custom repr"
+    assert my_vars["normal"] == "42"
+    assert "Fail object" in my_vars["fail"]
+
+
 @pytest.mark.parametrize(
     "dsn",
     [
@@ -1012,94 +1039,9 @@ def test_init_string_types(dsn, sentry_init):
     # extra code
     sentry_init(dsn)
     assert (
-        Hub.current.client.dsn
+        sentry_sdk.get_client().dsn
         == "http://894b7d594095440f8dfea9b300e6f572@localhost:8000/2"
     )
-
-
-def test_sending_events_with_tracing():
-    """
-    Tests for calling the right transport method (capture_event vs
-    capture_envelope) from the SDK client for different data types.
-    """
-
-    envelopes = []
-    events = []
-
-    class CustomTransport(Transport):
-        def capture_envelope(self, envelope):
-            envelopes.append(envelope)
-
-        def capture_event(self, event):
-            events.append(event)
-
-    with Hub(Client(enable_tracing=True, transport=CustomTransport())):
-        try:
-            1 / 0
-        except Exception:
-            event_id = capture_exception()
-
-        # Assert error events get passed in via capture_envelope
-        assert not events
-        envelope = envelopes.pop()
-        (item,) = envelope.items
-        assert item.data_category == "error"
-        assert item.headers.get("type") == "event"
-        assert item.get_event()["event_id"] == event_id
-
-        with start_transaction(name="foo"):
-            pass
-
-        # Assert transactions get passed in via capture_envelope
-        assert not events
-        envelope = envelopes.pop()
-
-        (item,) = envelope.items
-        assert item.data_category == "transaction"
-        assert item.headers.get("type") == "transaction"
-
-    assert not envelopes
-    assert not events
-
-
-def test_sending_events_with_no_tracing():
-    """
-    Tests for calling the right transport method (capture_event vs
-    capture_envelope) from the SDK client for different data types.
-    """
-
-    envelopes = []
-    events = []
-
-    class CustomTransport(Transport):
-        def capture_envelope(self, envelope):
-            envelopes.append(envelope)
-
-        def capture_event(self, event):
-            events.append(event)
-
-    with Hub(Client(enable_tracing=False, transport=CustomTransport())):
-        try:
-            1 / 0
-        except Exception:
-            event_id = capture_exception()
-
-        # Assert error events get passed in via capture_event
-        assert not envelopes
-        event = events.pop()
-
-        assert event["event_id"] == event_id
-        assert "type" not in event
-
-        with start_transaction(name="foo"):
-            pass
-
-        # Assert transactions get passed in via capture_envelope
-        assert not events
-        assert not envelopes
-
-    assert not envelopes
-    assert not events
 
 
 @pytest.mark.parametrize(
@@ -1195,13 +1137,52 @@ def test_debug_option(
     else:
         sentry_init(debug=client_option)
 
-    Hub.current._capture_internal_exception(
-        (ValueError, ValueError("something is wrong"), None)
-    )
+    capture_internal_exception((ValueError, ValueError("something is wrong"), None))
     if debug_output_expected:
         assert "something is wrong" in caplog.text
     else:
         assert "something is wrong" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "client_option,env_var_value,spotlight_url_expected",
+    [
+        (None, None, None),
+        (None, "", None),
+        (None, "F", None),
+        (False, None, None),
+        (False, "", None),
+        (False, "t", None),
+        (None, "t", DEFAULT_SPOTLIGHT_URL),
+        (None, "1", DEFAULT_SPOTLIGHT_URL),
+        (True, None, DEFAULT_SPOTLIGHT_URL),
+        (True, "http://localhost:8080/slurp", DEFAULT_SPOTLIGHT_URL),
+        ("http://localhost:8080/slurp", "f", "http://localhost:8080/slurp"),
+        (None, "http://localhost:8080/slurp", "http://localhost:8080/slurp"),
+    ],
+)
+def test_spotlight_option(
+    sentry_init,
+    monkeypatch,
+    client_option,
+    env_var_value,
+    spotlight_url_expected,
+):
+    if env_var_value is None:
+        monkeypatch.delenv("SENTRY_SPOTLIGHT", raising=False)
+    else:
+        monkeypatch.setenv("SENTRY_SPOTLIGHT", env_var_value)
+
+    if client_option is None:
+        sentry_init()
+    else:
+        sentry_init(spotlight=client_option)
+
+    client = sentry_sdk.get_client()
+    url = client.spotlight.url if client.spotlight else None
+    assert (
+        url == spotlight_url_expected
+    ), f"With config {client_option} and env {env_var_value}"
 
 
 class IssuesSamplerTestConfig:
@@ -1313,3 +1294,199 @@ def test_error_sampler(_, sentry_init, capture_events, test_config):
 
         # Ensure two arguments (the event and hint) were passed to the sampler function
         assert len(test_config.sampler_function_mock.call_args[0]) == 2
+
+
+@pytest.mark.forked
+@pytest.mark.parametrize(
+    "opt,missing_flags",
+    [
+        # lazy mode with enable-threads, no warning
+        [{"enable-threads": True, "lazy-apps": True}, []],
+        [{"enable-threads": "true", "lazy-apps": b"1"}, []],
+        # preforking mode with enable-threads and py-call-uwsgi-fork-hooks, no warning
+        [{"enable-threads": True, "py-call-uwsgi-fork-hooks": True}, []],
+        [{"enable-threads": b"true", "py-call-uwsgi-fork-hooks": b"on"}, []],
+        # lazy mode, no enable-threads, warning
+        [{"lazy-apps": True}, ["--enable-threads"]],
+        [{"enable-threads": b"false", "lazy-apps": True}, ["--enable-threads"]],
+        [{"enable-threads": b"0", "lazy": True}, ["--enable-threads"]],
+        # preforking mode, no enable-threads or py-call-uwsgi-fork-hooks, warning
+        [{}, ["--enable-threads", "--py-call-uwsgi-fork-hooks"]],
+        [{"processes": b"2"}, ["--enable-threads", "--py-call-uwsgi-fork-hooks"]],
+        [{"enable-threads": True}, ["--py-call-uwsgi-fork-hooks"]],
+        [{"enable-threads": b"1"}, ["--py-call-uwsgi-fork-hooks"]],
+        [
+            {"enable-threads": b"false"},
+            ["--enable-threads", "--py-call-uwsgi-fork-hooks"],
+        ],
+        [{"py-call-uwsgi-fork-hooks": True}, ["--enable-threads"]],
+    ],
+)
+def test_uwsgi_warnings(sentry_init, recwarn, opt, missing_flags):
+    uwsgi = mock.MagicMock()
+    uwsgi.opt = opt
+    with mock.patch.dict("sys.modules", uwsgi=uwsgi):
+        sentry_init(profiles_sample_rate=1.0)
+        if missing_flags:
+            assert len(recwarn) == 1
+            record = recwarn.pop()
+            for flag in missing_flags:
+                assert flag in str(record.message)
+        else:
+            assert not recwarn
+
+
+class TestSpanClientReports:
+    """
+    Tests for client reports related to spans.
+    """
+
+    @staticmethod
+    def span_dropper(spans_to_drop):
+        """
+        Returns a function that can be used to drop spans from an event.
+        """
+
+        def drop_spans(event, _):
+            event["spans"] = event["spans"][spans_to_drop:]
+            return event
+
+        return drop_spans
+
+    @staticmethod
+    def mock_transaction_event(span_count):
+        """
+        Returns a mock transaction event with the given number of spans.
+        """
+
+        return defaultdict(
+            mock.MagicMock,
+            type="transaction",
+            spans=[mock.MagicMock() for _ in range(span_count)],
+        )
+
+    def __init__(self, span_count):
+        """Configures a test case with the number of spans dropped and whether the transaction was dropped."""
+        self.span_count = span_count
+        self.expected_record_lost_event_calls = Counter()
+        self.before_send = lambda event, _: event
+        self.event_processor = lambda event, _: event
+
+    def _update_resulting_calls(self, reason, drops_transactions=0, drops_spans=0):
+        """
+        Updates the expected calls with the given resulting calls.
+        """
+        if drops_transactions > 0:
+            self.expected_record_lost_event_calls[
+                (reason, "transaction", None, drops_transactions)
+            ] += 1
+
+        if drops_spans > 0:
+            self.expected_record_lost_event_calls[
+                (reason, "span", None, drops_spans)
+            ] += 1
+
+    def with_before_send(
+        self,
+        before_send,
+        *,
+        drops_transactions=0,
+        drops_spans=0,
+    ):
+        self.before_send = before_send
+        self._update_resulting_calls(
+            "before_send",
+            drops_transactions,
+            drops_spans,
+        )
+
+        return self
+
+    def with_event_processor(
+        self,
+        event_processor,
+        *,
+        drops_transactions=0,
+        drops_spans=0,
+    ):
+        self.event_processor = event_processor
+        self._update_resulting_calls(
+            "event_processor",
+            drops_transactions,
+            drops_spans,
+        )
+
+        return self
+
+    def run(self, sentry_init, capture_record_lost_event_calls):
+        """Runs the test case with the configured parameters."""
+        sentry_init(before_send_transaction=self.before_send)
+        record_lost_event_calls = capture_record_lost_event_calls()
+
+        with sentry_sdk.isolation_scope() as scope:
+            scope.add_event_processor(self.event_processor)
+            event = self.mock_transaction_event(self.span_count)
+            sentry_sdk.get_client().capture_event(event, scope=scope)
+
+        # We use counters to ensure that the calls are made the expected number of times, disregarding order.
+        assert Counter(record_lost_event_calls) == self.expected_record_lost_event_calls
+
+
+@pytest.mark.parametrize(
+    "test_config",
+    (
+        TestSpanClientReports(span_count=10),  # No spans dropped
+        TestSpanClientReports(span_count=0).with_before_send(
+            lambda e, _: None,
+            drops_transactions=1,
+            drops_spans=1,
+        ),
+        TestSpanClientReports(span_count=10).with_before_send(
+            lambda e, _: None,
+            drops_transactions=1,
+            drops_spans=11,
+        ),
+        TestSpanClientReports(span_count=10).with_before_send(
+            TestSpanClientReports.span_dropper(3),
+            drops_spans=3,
+        ),
+        TestSpanClientReports(span_count=10).with_before_send(
+            TestSpanClientReports.span_dropper(10),
+            drops_spans=10,
+        ),
+        TestSpanClientReports(span_count=10).with_event_processor(
+            lambda e, _: None,
+            drops_transactions=1,
+            drops_spans=11,
+        ),
+        TestSpanClientReports(span_count=10).with_event_processor(
+            TestSpanClientReports.span_dropper(3),
+            drops_spans=3,
+        ),
+        TestSpanClientReports(span_count=10).with_event_processor(
+            TestSpanClientReports.span_dropper(10),
+            drops_spans=10,
+        ),
+        TestSpanClientReports(span_count=10)
+        .with_event_processor(
+            TestSpanClientReports.span_dropper(3),
+            drops_spans=3,
+        )
+        .with_before_send(
+            TestSpanClientReports.span_dropper(5),
+            drops_spans=5,
+        ),
+        TestSpanClientReports(10)
+        .with_event_processor(
+            TestSpanClientReports.span_dropper(3),
+            drops_spans=3,
+        )
+        .with_before_send(
+            lambda e, _: None,
+            drops_transactions=1,
+            drops_spans=8,  # 3 of the 11 (incl. transaction) spans already dropped
+        ),
+    ),
+)
+def test_dropped_transaction(sentry_init, capture_record_lost_event_calls, test_config):
+    test_config.run(sentry_init, capture_record_lost_event_calls)

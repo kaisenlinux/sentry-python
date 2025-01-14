@@ -1,10 +1,21 @@
-import pytest
+import threading
 import re
 import sys
+from datetime import timedelta, datetime, timezone
+from unittest import mock
 
+import pytest
+
+import sentry_sdk
+from sentry_sdk.integrations import Integration
+from sentry_sdk._queue import Queue
 from sentry_sdk.utils import (
     Components,
     Dsn,
+    datetime_from_isoformat,
+    env_to_bool,
+    format_timestamp,
+    get_current_thread_meta,
     get_default_release,
     get_error_message,
     get_git_revision,
@@ -18,21 +29,24 @@ from sentry_sdk.utils import (
     serialize_frame,
     is_sentry_url,
     _get_installed_modules,
+    _generate_installed_modules,
+    ensure_integration_enabled,
 )
 
-import sentry_sdk
+
+class TestIntegration(Integration):
+    """
+    Test integration for testing ensure_integration_enabled decorator.
+    """
+
+    identifier = "test"
+    setup_once = mock.MagicMock()
+
 
 try:
-    from unittest import mock  # python 3.3 and above
+    import gevent
 except ImportError:
-    import mock  # python < 3.3
-
-try:
-    # Python 3
-    FileNotFoundError
-except NameError:
-    # Python 2
-    FileNotFoundError = IOError
+    gevent = None
 
 
 def _normalize_distribution_name(name):
@@ -44,6 +58,126 @@ def _normalize_distribution_name(name):
     for more details.
     """
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+@pytest.mark.parametrize(
+    ("input_str", "expected_output"),
+    (
+        (
+            "2021-01-01T00:00:00.000000Z",
+            datetime(2021, 1, 1, tzinfo=timezone.utc),
+        ),  # UTC time
+        (
+            "2021-01-01T00:00:00.000000",
+            datetime(2021, 1, 1).astimezone(timezone.utc),
+        ),  # No TZ -- assume local but convert to UTC
+        (
+            "2021-01-01T00:00:00Z",
+            datetime(2021, 1, 1, tzinfo=timezone.utc),
+        ),  # UTC - No milliseconds
+        (
+            "2021-01-01T00:00:00.000000+00:00",
+            datetime(2021, 1, 1, tzinfo=timezone.utc),
+        ),
+        (
+            "2021-01-01T00:00:00.000000-00:00",
+            datetime(2021, 1, 1, tzinfo=timezone.utc),
+        ),
+        (
+            "2021-01-01T00:00:00.000000+0000",
+            datetime(2021, 1, 1, tzinfo=timezone.utc),
+        ),
+        (
+            "2021-01-01T00:00:00.000000-0000",
+            datetime(2021, 1, 1, tzinfo=timezone.utc),
+        ),
+        (
+            "2020-12-31T00:00:00.000000+02:00",
+            datetime(2020, 12, 31, tzinfo=timezone(timedelta(hours=2))),
+        ),  # UTC+2 time
+        (
+            "2020-12-31T00:00:00.000000-0200",
+            datetime(2020, 12, 31, tzinfo=timezone(timedelta(hours=-2))),
+        ),  # UTC-2 time
+        (
+            "2020-12-31T00:00:00-0200",
+            datetime(2020, 12, 31, tzinfo=timezone(timedelta(hours=-2))),
+        ),  # UTC-2 time - no milliseconds
+    ),
+)
+def test_datetime_from_isoformat(input_str, expected_output):
+    assert datetime_from_isoformat(input_str) == expected_output, input_str
+
+
+@pytest.mark.parametrize(
+    "env_var_value,strict,expected",
+    [
+        (None, True, None),
+        (None, False, False),
+        ("", True, None),
+        ("", False, False),
+        ("t", True, True),
+        ("T", True, True),
+        ("t", False, True),
+        ("T", False, True),
+        ("y", True, True),
+        ("Y", True, True),
+        ("y", False, True),
+        ("Y", False, True),
+        ("1", True, True),
+        ("1", False, True),
+        ("True", True, True),
+        ("True", False, True),
+        ("true", True, True),
+        ("true", False, True),
+        ("tRuE", True, True),
+        ("tRuE", False, True),
+        ("Yes", True, True),
+        ("Yes", False, True),
+        ("yes", True, True),
+        ("yes", False, True),
+        ("yEs", True, True),
+        ("yEs", False, True),
+        ("On", True, True),
+        ("On", False, True),
+        ("on", True, True),
+        ("on", False, True),
+        ("oN", True, True),
+        ("oN", False, True),
+        ("f", True, False),
+        ("f", False, False),
+        ("n", True, False),
+        ("N", True, False),
+        ("n", False, False),
+        ("N", False, False),
+        ("0", True, False),
+        ("0", False, False),
+        ("False", True, False),
+        ("False", False, False),
+        ("false", True, False),
+        ("false", False, False),
+        ("FaLsE", True, False),
+        ("FaLsE", False, False),
+        ("No", True, False),
+        ("No", False, False),
+        ("no", True, False),
+        ("no", False, False),
+        ("nO", True, False),
+        ("nO", False, False),
+        ("Off", True, False),
+        ("Off", False, False),
+        ("off", True, False),
+        ("off", False, False),
+        ("oFf", True, False),
+        ("oFf", False, False),
+        ("xxx", True, None),
+        ("xxx", False, True),
+    ],
+)
+def test_env_to_bool(env_var_value, strict, expected):
+    assert (
+        env_to_bool(env_var_value, strict=strict) == expected
+    ), f"Value: {env_var_value}, strict: {strict}"
 
 
 @pytest.mark.parametrize(
@@ -89,12 +223,7 @@ def _normalize_distribution_name(name):
     ],
 )
 def test_sanitize_url(url, expected_result):
-    # sort parts because old Python versions (<3.6) don't preserve order
-    sanitized_url = sanitize_url(url)
-    parts = sorted(re.split(r"\&|\?|\#", sanitized_url))
-    expected_parts = sorted(re.split(r"\&|\?|\#", expected_result))
-
-    assert parts == expected_parts
+    assert sanitize_url(url) == expected_result
 
 
 @pytest.mark.parametrize(
@@ -208,13 +337,10 @@ def test_sanitize_url(url, expected_result):
 )
 def test_sanitize_url_and_split(url, expected_result):
     sanitized_url = sanitize_url(url, split=True)
-    # sort query because old Python versions (<3.6) don't preserve order
-    query = sorted(sanitized_url.query.split("&"))
-    expected_query = sorted(expected_result.query.split("&"))
 
     assert sanitized_url.scheme == expected_result.scheme
     assert sanitized_url.netloc == expected_result.netloc
-    assert query == expected_query
+    assert sanitized_url.query == expected_result.query
     assert sanitized_url.path == expected_result.path
     assert sanitized_url.fragment == expected_result.fragment
 
@@ -341,13 +467,7 @@ def test_sanitize_url_and_split(url, expected_result):
 def test_parse_url(url, sanitize, expected_url, expected_query, expected_fragment):
     assert parse_url(url, sanitize=sanitize).url == expected_url
     assert parse_url(url, sanitize=sanitize).fragment == expected_fragment
-
-    # sort parts because old Python versions (<3.6) don't preserve order
-    sanitized_query = parse_url(url, sanitize=sanitize).query
-    query_parts = sorted(re.split(r"\&|\?|\#", sanitized_query))
-    expected_query_parts = sorted(re.split(r"\&|\?|\#", expected_query))
-
-    assert query_parts == expected_query_parts
+    assert parse_url(url, sanitize=sanitize).query == expected_query
 
 
 @pytest.mark.parametrize(
@@ -453,19 +573,17 @@ def test_parse_version(version, expected_result):
 
 
 @pytest.fixture
-def mock_hub_with_dsn_netloc():
+def mock_client_with_dsn_netloc():
     """
-    Returns a mocked hub with a DSN netloc of "abcd1234.ingest.sentry.io".
+    Returns a mocked Client with a DSN netloc of "abcd1234.ingest.sentry.io".
     """
+    mock_client = mock.Mock(spec=sentry_sdk.Client)
+    mock_client.transport = mock.Mock(spec=sentry_sdk.Transport)
+    mock_client.transport.parsed_dsn = mock.Mock(spec=Dsn)
 
-    mock_hub = mock.Mock(spec=sentry_sdk.Hub)
-    mock_hub.client = mock.Mock(spec=sentry_sdk.Client)
-    mock_hub.client.transport = mock.Mock(spec=sentry_sdk.Transport)
-    mock_hub.client.transport.parsed_dsn = mock.Mock(spec=Dsn)
+    mock_client.transport.parsed_dsn.netloc = "abcd1234.ingest.sentry.io"
 
-    mock_hub.client.transport.parsed_dsn.netloc = "abcd1234.ingest.sentry.io"
-
-    return mock_hub
+    return mock_client
 
 
 @pytest.mark.parametrize(
@@ -475,19 +593,18 @@ def mock_hub_with_dsn_netloc():
         ["https://asdf@abcd1234.ingest.notsentry.io/123456789", False],
     ],
 )
-def test_is_sentry_url_true(test_url, is_sentry_url_expected, mock_hub_with_dsn_netloc):
-    ret_val = is_sentry_url(mock_hub_with_dsn_netloc, test_url)
+def test_is_sentry_url_true(
+    test_url, is_sentry_url_expected, mock_client_with_dsn_netloc
+):
+    ret_val = is_sentry_url(mock_client_with_dsn_netloc, test_url)
 
     assert ret_val == is_sentry_url_expected
 
 
 def test_is_sentry_url_no_client():
-    hub = mock.Mock()
-    hub.client = None
-
     test_url = "https://asdf@abcd1234.ingest.sentry.io/123456789"
 
-    ret_val = is_sentry_url(hub, test_url)
+    ret_val = is_sentry_url(None, test_url)
 
     assert not ret_val
 
@@ -528,7 +645,7 @@ def test_installed_modules():
 
     installed_distributions = {
         _normalize_distribution_name(dist): version
-        for dist, version in _get_installed_modules().items()
+        for dist, version in _generate_installed_modules()
     }
 
     if importlib_available:
@@ -592,3 +709,245 @@ def test_default_release_empty_string():
         release = get_default_release()
 
     assert release is None
+
+
+def test_ensure_integration_enabled_integration_enabled(sentry_init):
+    def original_function():
+        return "original"
+
+    def function_to_patch():
+        return "patched"
+
+    sentry_init(integrations=[TestIntegration()])
+
+    # Test the decorator by applying to function_to_patch
+    patched_function = ensure_integration_enabled(TestIntegration, original_function)(
+        function_to_patch
+    )
+
+    assert patched_function() == "patched"
+    assert patched_function.__name__ == "original_function"
+
+
+def test_ensure_integration_enabled_integration_disabled(sentry_init):
+    def original_function():
+        return "original"
+
+    def function_to_patch():
+        return "patched"
+
+    sentry_init(integrations=[])  # TestIntegration is disabled
+
+    # Test the decorator by applying to function_to_patch
+    patched_function = ensure_integration_enabled(TestIntegration, original_function)(
+        function_to_patch
+    )
+
+    assert patched_function() == "original"
+    assert patched_function.__name__ == "original_function"
+
+
+def test_ensure_integration_enabled_no_original_function_enabled(sentry_init):
+    shared_variable = "original"
+
+    def function_to_patch():
+        nonlocal shared_variable
+        shared_variable = "patched"
+
+    sentry_init(integrations=[TestIntegration])
+
+    # Test the decorator by applying to function_to_patch
+    patched_function = ensure_integration_enabled(TestIntegration)(function_to_patch)
+    patched_function()
+
+    assert shared_variable == "patched"
+    assert patched_function.__name__ == "function_to_patch"
+
+
+def test_ensure_integration_enabled_no_original_function_disabled(sentry_init):
+    shared_variable = "original"
+
+    def function_to_patch():
+        nonlocal shared_variable
+        shared_variable = "patched"
+
+    sentry_init(integrations=[])
+
+    # Test the decorator by applying to function_to_patch
+    patched_function = ensure_integration_enabled(TestIntegration)(function_to_patch)
+    patched_function()
+
+    assert shared_variable == "original"
+    assert patched_function.__name__ == "function_to_patch"
+
+
+@pytest.mark.parametrize(
+    "delta,expected_milliseconds",
+    [
+        [timedelta(milliseconds=132), 132.0],
+        [timedelta(hours=1, milliseconds=132), float(60 * 60 * 1000 + 132)],
+        [timedelta(days=10), float(10 * 24 * 60 * 60 * 1000)],
+        [timedelta(microseconds=100), 0.1],
+    ],
+)
+def test_duration_in_milliseconds(delta, expected_milliseconds):
+    assert delta / timedelta(milliseconds=1) == expected_milliseconds
+
+
+def test_get_current_thread_meta_explicit_thread():
+    results = Queue(maxsize=1)
+
+    def target1():
+        pass
+
+    def target2():
+        results.put(get_current_thread_meta(thread1))
+
+    thread1 = threading.Thread(target=target1)
+    thread1.start()
+
+    thread2 = threading.Thread(target=target2)
+    thread2.start()
+
+    thread2.join()
+    thread1.join()
+
+    assert (thread1.ident, thread1.name) == results.get(timeout=1)
+
+
+def test_get_current_thread_meta_bad_explicit_thread():
+    thread = "fake thread"
+
+    main_thread = threading.main_thread()
+
+    assert (main_thread.ident, main_thread.name) == get_current_thread_meta(thread)
+
+
+@pytest.mark.skipif(gevent is None, reason="gevent not enabled")
+def test_get_current_thread_meta_gevent_in_thread():
+    results = Queue(maxsize=1)
+
+    def target():
+        with mock.patch("sentry_sdk.utils.is_gevent", side_effect=[True]):
+            job = gevent.spawn(get_current_thread_meta)
+            job.join()
+            results.put(job.value)
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join()
+    assert (thread.ident, None) == results.get(timeout=1)
+
+
+@pytest.mark.skipif(gevent is None, reason="gevent not enabled")
+def test_get_current_thread_meta_gevent_in_thread_failed_to_get_hub():
+    results = Queue(maxsize=1)
+
+    def target():
+        with mock.patch("sentry_sdk.utils.is_gevent", side_effect=[True]):
+            with mock.patch(
+                "sentry_sdk.utils.get_gevent_hub", side_effect=["fake gevent hub"]
+            ):
+                job = gevent.spawn(get_current_thread_meta)
+                job.join()
+                results.put(job.value)
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join()
+    assert (thread.ident, thread.name) == results.get(timeout=1)
+
+
+def test_get_current_thread_meta_running_thread():
+    results = Queue(maxsize=1)
+
+    def target():
+        results.put(get_current_thread_meta())
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join()
+    assert (thread.ident, thread.name) == results.get(timeout=1)
+
+
+def test_get_current_thread_meta_bad_running_thread():
+    results = Queue(maxsize=1)
+
+    def target():
+        with mock.patch("threading.current_thread", side_effect=["fake thread"]):
+            results.put(get_current_thread_meta())
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join()
+
+    main_thread = threading.main_thread()
+    assert (main_thread.ident, main_thread.name) == results.get(timeout=1)
+
+
+def test_get_current_thread_meta_main_thread():
+    results = Queue(maxsize=1)
+
+    def target():
+        # mock that somehow the current thread doesn't exist
+        with mock.patch("threading.current_thread", side_effect=[None]):
+            results.put(get_current_thread_meta())
+
+    main_thread = threading.main_thread()
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join()
+    assert (main_thread.ident, main_thread.name) == results.get(timeout=1)
+
+
+def test_get_current_thread_meta_failed_to_get_main_thread():
+    results = Queue(maxsize=1)
+
+    def target():
+        with mock.patch("threading.current_thread", side_effect=["fake thread"]):
+            with mock.patch("threading.current_thread", side_effect=["fake thread"]):
+                results.put(get_current_thread_meta())
+
+    main_thread = threading.main_thread()
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join()
+    assert (main_thread.ident, main_thread.name) == results.get(timeout=1)
+
+
+@pytest.mark.parametrize(
+    ("datetime_object", "expected_output"),
+    (
+        (
+            datetime(2021, 1, 1, tzinfo=timezone.utc),
+            "2021-01-01T00:00:00.000000Z",
+        ),  # UTC time
+        (
+            datetime(2021, 1, 1, tzinfo=timezone(timedelta(hours=2))),
+            "2020-12-31T22:00:00.000000Z",
+        ),  # UTC+2 time
+        (
+            datetime(2021, 1, 1, tzinfo=timezone(timedelta(hours=-7))),
+            "2021-01-01T07:00:00.000000Z",
+        ),  # UTC-7 time
+        (
+            datetime(2021, 2, 3, 4, 56, 7, 890123, tzinfo=timezone.utc),
+            "2021-02-03T04:56:07.890123Z",
+        ),  # UTC time all non-zero fields
+    ),
+)
+def test_format_timestamp(datetime_object, expected_output):
+    formatted = format_timestamp(datetime_object)
+
+    assert formatted == expected_output
+
+
+def test_format_timestamp_naive():
+    datetime_object = datetime(2021, 1, 1)
+    timestamp_regex = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{6}Z"
+
+    # Ensure that some timestamp is returned, without error. We currently treat these as local time, but this is an
+    # implementation detail which we should not assert here.
+    assert re.fullmatch(timestamp_regex, format_timestamp(datetime_object))

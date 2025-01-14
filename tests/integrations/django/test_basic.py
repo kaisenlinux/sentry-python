@@ -1,11 +1,11 @@
-from __future__ import absolute_import
-
+import inspect
 import json
 import os
-import random
 import re
+import sys
 import pytest
 from functools import partial
+from unittest.mock import patch
 
 from werkzeug.test import Client
 
@@ -13,22 +13,30 @@ from django import VERSION as DJANGO_VERSION
 from django.contrib.auth.models import User
 from django.core.management import execute_from_command_line
 from django.db.utils import OperationalError, ProgrammingError, DataError
+from django.http.request import RawPostDataException
+from django.utils.functional import SimpleLazyObject
 
 try:
     from django.urls import reverse
 except ImportError:
     from django.core.urlresolvers import reverse
 
-from sentry_sdk._compat import PY2, PY310
-from sentry_sdk import capture_message, capture_exception, configure_scope
+import sentry_sdk
+from sentry_sdk._compat import PY310
+from sentry_sdk import capture_message, capture_exception
 from sentry_sdk.consts import SPANDATA
-from sentry_sdk.integrations.django import DjangoIntegration, _set_db_data
+from sentry_sdk.integrations.django import (
+    DjangoIntegration,
+    DjangoRequestExtractor,
+    _set_db_data,
+)
 from sentry_sdk.integrations.django.signals_handlers import _get_receiver_name
-from sentry_sdk.integrations.django.caching import _get_span_description
 from sentry_sdk.integrations.executing import ExecutingIntegration
+from sentry_sdk.profiler.utils import get_frame_name
 from sentry_sdk.tracing import Span
 from tests.conftest import unpack_werkzeug_response
 from tests.integrations.django.myapp.wsgi import application
+from tests.integrations.django.myapp.signals import myapp_custom_signal_silenced
 from tests.integrations.django.utils import pytest_mark_django_db_decorator
 
 DJANGO_VERSION = DJANGO_VERSION[:2]
@@ -37,36 +45,6 @@ DJANGO_VERSION = DJANGO_VERSION[:2]
 @pytest.fixture
 def client():
     return Client(application)
-
-
-@pytest.fixture
-def use_django_caching(settings):
-    settings.CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-            "LOCATION": "unique-snowflake-%s" % random.randint(1, 1000000),
-        }
-    }
-
-
-@pytest.fixture
-def use_django_caching_with_middlewares(settings):
-    settings.CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-            "LOCATION": "unique-snowflake-%s" % random.randint(1, 1000000),
-        }
-    }
-    if hasattr(settings, "MIDDLEWARE"):
-        middleware = settings.MIDDLEWARE
-    elif hasattr(settings, "MIDDLEWARE_CLASSES"):
-        middleware = settings.MIDDLEWARE_CLASSES
-    else:
-        middleware = None
-
-    if middleware is not None:
-        middleware.insert(0, "django.middleware.cache.UpdateCacheMiddleware")
-        middleware.append("django.middleware.cache.FetchFromCacheMiddleware")
 
 
 def test_view_exceptions(sentry_init, client, capture_exceptions, capture_events):
@@ -171,7 +149,11 @@ def test_transaction_with_class_view(sentry_init, client, capture_events):
 
 def test_has_trace_if_performance_enabled(sentry_init, client, capture_events):
     sentry_init(
-        integrations=[DjangoIntegration()],
+        integrations=[
+            DjangoIntegration(
+                http_methods_to_capture=("HEAD",),
+            )
+        ],
         traces_sample_rate=1.0,
     )
     events = capture_events()
@@ -218,7 +200,11 @@ def test_has_trace_if_performance_disabled(sentry_init, client, capture_events):
 
 def test_trace_from_headers_if_performance_enabled(sentry_init, client, capture_events):
     sentry_init(
-        integrations=[DjangoIntegration()],
+        integrations=[
+            DjangoIntegration(
+                http_methods_to_capture=("HEAD",),
+            )
+        ],
         traces_sample_rate=1.0,
     )
 
@@ -251,7 +237,11 @@ def test_trace_from_headers_if_performance_disabled(
     sentry_init, client, capture_events
 ):
     sentry_init(
-        integrations=[DjangoIntegration()],
+        integrations=[
+            DjangoIntegration(
+                http_methods_to_capture=("HEAD",),
+            )
+        ],
     )
 
     events = capture_events()
@@ -276,7 +266,7 @@ def test_trace_from_headers_if_performance_disabled(
 
 
 @pytest.mark.forked
-@pytest.mark.django_db
+@pytest_mark_django_db_decorator()
 def test_user_captured(sentry_init, client, capture_events):
     sentry_init(integrations=[DjangoIntegration()], send_default_pii=True)
     events = capture_events()
@@ -298,7 +288,7 @@ def test_user_captured(sentry_init, client, capture_events):
 
 
 @pytest.mark.forked
-@pytest.mark.django_db
+@pytest_mark_django_db_decorator()
 def test_queryset_repr(sentry_init, capture_events):
     sentry_init(integrations=[DjangoIntegration()])
     events = capture_events()
@@ -339,17 +329,14 @@ def test_custom_error_handler_request_context(sentry_init, client, capture_event
     }
 
 
-def test_500(sentry_init, client, capture_events):
+def test_500(sentry_init, client):
     sentry_init(integrations=[DjangoIntegration()], send_default_pii=True)
-    events = capture_events()
 
     content, status, headers = unpack_werkzeug_response(client.get("/view-exc"))
     assert status.lower() == "500 internal server error"
     content = content.decode("utf-8")
 
-    (event,) = events
-    event_id = event["event_id"]
-    assert content == "Sentry error: %s" % event_id
+    assert content == "Sentry error."
 
 
 @pytest.mark.forked
@@ -362,7 +349,7 @@ def test_management_command_raises():
 
 
 @pytest.mark.forked
-@pytest.mark.django_db
+@pytest_mark_django_db_decorator()
 @pytest.mark.parametrize("with_integration", [True, False])
 def test_sql_queries(sentry_init, capture_events, with_integration):
     sentry_init(
@@ -377,8 +364,7 @@ def test_sql_queries(sentry_init, capture_events, with_integration):
 
     sql = connection.cursor()
 
-    with configure_scope() as scope:
-        scope.clear_breadcrumbs()
+    sentry_sdk.get_isolation_scope().clear_breadcrumbs()
 
     with pytest.raises(OperationalError):
         # table doesn't even exist
@@ -412,8 +398,7 @@ def test_sql_dict_query_params(sentry_init, capture_events):
     sql = connections["postgres"].cursor()
 
     events = capture_events()
-    with configure_scope() as scope:
-        scope.clear_breadcrumbs()
+    sentry_sdk.get_isolation_scope().clear_breadcrumbs()
 
     with pytest.raises(ProgrammingError):
         sql.execute(
@@ -478,8 +463,7 @@ def test_sql_psycopg2_string_composition(sentry_init, capture_events, query):
 
     sql = connections["postgres"].cursor()
 
-    with configure_scope() as scope:
-        scope.clear_breadcrumbs()
+    sentry_sdk.get_isolation_scope().clear_breadcrumbs()
 
     events = capture_events()
 
@@ -512,8 +496,7 @@ def test_sql_psycopg2_placeholders(sentry_init, capture_events):
     sql = connections["postgres"].cursor()
 
     events = capture_events()
-    with configure_scope() as scope:
-        scope.clear_breadcrumbs()
+    sentry_sdk.get_isolation_scope().clear_breadcrumbs()
 
     with pytest.raises(DataError):
         names = ["foo", "bar"]
@@ -665,11 +648,13 @@ def test_db_connection_span_data(sentry_init, client, capture_events):
             assert data.get(SPANDATA.SERVER_ADDRESS) == os.environ.get(
                 "SENTRY_PYTHON_TEST_POSTGRES_HOST", "localhost"
             )
-            assert data.get(SPANDATA.SERVER_PORT) == "5432"
+            assert data.get(SPANDATA.SERVER_PORT) == os.environ.get(
+                "SENTRY_PYTHON_TEST_POSTGRES_PORT", "5432"
+            )
 
 
 def test_set_db_data_custom_backend():
-    class DummyBackend(object):
+    class DummyBackend:
         # https://github.com/mongodb/mongo-python-driver/blob/6ffae5522c960252b8c9adfe2a19b29ff28187cb/pymongo/collection.py#L126
         def __getattr__(self, attr):
             return self
@@ -777,6 +762,26 @@ def test_read_request(sentry_init, client, capture_events):
     assert "data" not in event["request"]
 
 
+def test_request_body_already_read(sentry_init, client, capture_events):
+    sentry_init(integrations=[DjangoIntegration()])
+
+    events = capture_events()
+
+    class MockExtractor(DjangoRequestExtractor):
+        def raw_data(self):
+            raise RawPostDataException
+
+    with patch("sentry_sdk.integrations.django.DjangoRequestExtractor", MockExtractor):
+        client.post(
+            reverse("post_echo"), data=b'{"hey": 42}', content_type="application/json"
+        )
+
+        (event,) = events
+
+        assert event["message"] == "hi"
+        assert "data" not in event["request"]
+
+
 def test_template_tracing_meta(sentry_init, client, capture_events):
     sentry_init(integrations=[DjangoIntegration()])
     events = capture_events()
@@ -795,9 +800,8 @@ def test_template_tracing_meta(sentry_init, client, capture_events):
     assert match is not None
     assert match.group(1) == traceparent
 
-    # Python 2 does not preserve sort order
     rendered_baggage = match.group(2)
-    assert sorted(rendered_baggage.split(",")) == sorted(baggage.split(","))
+    assert rendered_baggage == baggage
 
 
 @pytest.mark.parametrize("with_executing_integration", [[], [ExecutingIntegration()]])
@@ -1035,6 +1039,47 @@ def test_signals_spans_disabled(sentry_init, client, capture_events):
     assert not transaction["spans"]
 
 
+EXPECTED_SIGNALS_SPANS_FILTERED = """\
+- op="http.server": description=null
+  - op="event.django": description="django.db.reset_queries"
+  - op="event.django": description="django.db.close_old_connections"
+  - op="event.django": description="tests.integrations.django.myapp.signals.signal_handler"\
+"""
+
+
+def test_signals_spans_filtering(sentry_init, client, capture_events, render_span_tree):
+    sentry_init(
+        integrations=[
+            DjangoIntegration(
+                middleware_spans=False,
+                signals_denylist=[
+                    myapp_custom_signal_silenced,
+                ],
+            ),
+        ],
+        traces_sample_rate=1.0,
+    )
+    events = capture_events()
+
+    client.get(reverse("send_myapp_custom_signal"))
+
+    (transaction,) = events
+
+    assert render_span_tree(transaction) == EXPECTED_SIGNALS_SPANS_FILTERED
+
+    assert transaction["spans"][0]["op"] == "event.django"
+    assert transaction["spans"][0]["description"] == "django.db.reset_queries"
+
+    assert transaction["spans"][1]["op"] == "event.django"
+    assert transaction["spans"][1]["description"] == "django.db.close_old_connections"
+
+    assert transaction["spans"][2]["op"] == "event.django"
+    assert (
+        transaction["spans"][2]["description"]
+        == "tests.integrations.django.myapp.signals.signal_handler"
+    )
+
+
 def test_csrf(sentry_init, client):
     """
     Assert that CSRF view decorator works even with the view wrapped in our own
@@ -1114,13 +1159,10 @@ def test_get_receiver_name():
 
     name = _get_receiver_name(dummy)
 
-    if PY2:
-        assert name == "tests.integrations.django.test_basic.dummy"
-    else:
-        assert (
-            name
-            == "tests.integrations.django.test_basic.test_get_receiver_name.<locals>.dummy"
-        )
+    assert (
+        name
+        == "tests.integrations.django.test_basic.test_get_receiver_name.<locals>.dummy"
+    )
 
     a_partial = partial(dummy)
     name = _get_receiver_name(a_partial)
@@ -1130,238 +1172,174 @@ def test_get_receiver_name():
         assert name == "partial(<function " + a_partial.func.__name__ + ">)"
 
 
-@pytest.mark.forked
-@pytest_mark_django_db_decorator()
-@pytest.mark.skipif(DJANGO_VERSION < (1, 9), reason="Requires Django >= 1.9")
-def test_cache_spans_disabled_middleware(
-    sentry_init, client, capture_events, use_django_caching_with_middlewares
-):
+@pytest.mark.skipif(DJANGO_VERSION <= (1, 11), reason="Requires Django > 1.11")
+def test_span_origin(sentry_init, client, capture_events):
     sentry_init(
         integrations=[
             DjangoIntegration(
-                cache_spans=False,
-                middleware_spans=False,
-                signals_spans=False,
-            )
-        ],
-        traces_sample_rate=1.0,
-    )
-    events = capture_events()
-
-    client.get(reverse("not_cached_view"))
-    client.get(reverse("not_cached_view"))
-
-    (first_event, second_event) = events
-    assert len(first_event["spans"]) == 0
-    assert len(second_event["spans"]) == 0
-
-
-@pytest.mark.forked
-@pytest_mark_django_db_decorator()
-@pytest.mark.skipif(DJANGO_VERSION < (1, 9), reason="Requires Django >= 1.9")
-def test_cache_spans_disabled_decorator(
-    sentry_init, client, capture_events, use_django_caching
-):
-    sentry_init(
-        integrations=[
-            DjangoIntegration(
-                cache_spans=False,
-                middleware_spans=False,
-                signals_spans=False,
-            )
-        ],
-        traces_sample_rate=1.0,
-    )
-    events = capture_events()
-
-    client.get(reverse("cached_view"))
-    client.get(reverse("cached_view"))
-
-    (first_event, second_event) = events
-    assert len(first_event["spans"]) == 0
-    assert len(second_event["spans"]) == 0
-
-
-@pytest.mark.forked
-@pytest_mark_django_db_decorator()
-@pytest.mark.skipif(DJANGO_VERSION < (1, 9), reason="Requires Django >= 1.9")
-def test_cache_spans_disabled_templatetag(
-    sentry_init, client, capture_events, use_django_caching
-):
-    sentry_init(
-        integrations=[
-            DjangoIntegration(
-                cache_spans=False,
-                middleware_spans=False,
-                signals_spans=False,
-            )
-        ],
-        traces_sample_rate=1.0,
-    )
-    events = capture_events()
-
-    client.get(reverse("view_with_cached_template_fragment"))
-    client.get(reverse("view_with_cached_template_fragment"))
-
-    (first_event, second_event) = events
-    assert len(first_event["spans"]) == 0
-    assert len(second_event["spans"]) == 0
-
-
-@pytest.mark.forked
-@pytest_mark_django_db_decorator()
-@pytest.mark.skipif(DJANGO_VERSION < (1, 9), reason="Requires Django >= 1.9")
-def test_cache_spans_middleware(
-    sentry_init, client, capture_events, use_django_caching_with_middlewares
-):
-    sentry_init(
-        integrations=[
-            DjangoIntegration(
+                middleware_spans=True,
+                signals_spans=True,
                 cache_spans=True,
-                middleware_spans=False,
-                signals_spans=False,
             )
         ],
         traces_sample_rate=1.0,
     )
-
-    client.application.load_middleware()
     events = capture_events()
 
-    client.get(reverse("not_cached_view"))
-    client.get(reverse("not_cached_view"))
+    client.get(reverse("view_with_signal"))
 
-    (first_event, second_event) = events
-    assert len(first_event["spans"]) == 1
-    assert first_event["spans"][0]["op"] == "cache.get_item"
-    assert first_event["spans"][0]["description"].startswith(
-        "get views.decorators.cache.cache_header."
+    (transaction,) = events
+
+    assert transaction["contexts"]["trace"]["origin"] == "auto.http.django"
+
+    signal_span_found = False
+    for span in transaction["spans"]:
+        assert span["origin"] == "auto.http.django"
+        if span["op"] == "event.django":
+            signal_span_found = True
+
+    assert signal_span_found
+
+
+def test_transaction_http_method_default(sentry_init, client, capture_events):
+    """
+    By default OPTIONS and HEAD requests do not create a transaction.
+    """
+    sentry_init(
+        integrations=[DjangoIntegration()],
+        traces_sample_rate=1.0,
     )
-    assert first_event["spans"][0]["data"] == {"cache.hit": False}
+    events = capture_events()
 
-    assert len(second_event["spans"]) == 2
-    assert second_event["spans"][0]["op"] == "cache.get_item"
-    assert second_event["spans"][0]["description"].startswith(
-        "get views.decorators.cache.cache_header."
-    )
-    assert second_event["spans"][0]["data"] == {"cache.hit": False}
+    client.get("/nomessage")
+    client.options("/nomessage")
+    client.head("/nomessage")
 
-    assert second_event["spans"][1]["op"] == "cache.get_item"
-    assert second_event["spans"][1]["description"].startswith(
-        "get views.decorators.cache.cache_page."
-    )
-    assert second_event["spans"][1]["data"]["cache.hit"]
-    assert "cache.item_size" in second_event["spans"][1]["data"]
+    (event,) = events
+
+    assert len(events) == 1
+    assert event["request"]["method"] == "GET"
 
 
-@pytest.mark.forked
-@pytest_mark_django_db_decorator()
-@pytest.mark.skipif(DJANGO_VERSION < (1, 9), reason="Requires Django >= 1.9")
-def test_cache_spans_decorator(sentry_init, client, capture_events, use_django_caching):
+def test_transaction_http_method_custom(sentry_init, client, capture_events):
     sentry_init(
         integrations=[
             DjangoIntegration(
-                cache_spans=True,
-                middleware_spans=False,
-                signals_spans=False,
+                http_methods_to_capture=(
+                    "OPTIONS",
+                    "head",
+                ),  # capitalization does not matter
             )
         ],
         traces_sample_rate=1.0,
     )
     events = capture_events()
 
-    client.get(reverse("cached_view"))
-    client.get(reverse("cached_view"))
+    client.get("/nomessage")
+    client.options("/nomessage")
+    client.head("/nomessage")
 
-    (first_event, second_event) = events
-    assert len(first_event["spans"]) == 1
-    assert first_event["spans"][0]["op"] == "cache.get_item"
-    assert first_event["spans"][0]["description"].startswith(
-        "get views.decorators.cache.cache_header."
-    )
-    assert first_event["spans"][0]["data"] == {"cache.hit": False}
+    assert len(events) == 2
 
-    assert len(second_event["spans"]) == 2
-    assert second_event["spans"][0]["op"] == "cache.get_item"
-    assert second_event["spans"][0]["description"].startswith(
-        "get views.decorators.cache.cache_header."
-    )
-    assert second_event["spans"][0]["data"] == {"cache.hit": False}
-
-    assert second_event["spans"][1]["op"] == "cache.get_item"
-    assert second_event["spans"][1]["description"].startswith(
-        "get views.decorators.cache.cache_page."
-    )
-    assert second_event["spans"][1]["data"]["cache.hit"]
-    assert "cache.item_size" in second_event["spans"][1]["data"]
+    (event1, event2) = events
+    assert event1["request"]["method"] == "OPTIONS"
+    assert event2["request"]["method"] == "HEAD"
 
 
-@pytest.mark.forked
-@pytest_mark_django_db_decorator()
-@pytest.mark.skipif(DJANGO_VERSION < (1, 9), reason="Requires Django >= 1.9")
-def test_cache_spans_templatetag(
-    sentry_init, client, capture_events, use_django_caching
+def test_ensures_spotlight_middleware_when_spotlight_is_enabled(sentry_init, settings):
+    """
+    Test that ensures if Spotlight is enabled, relevant SpotlightMiddleware
+    is added to middleware list in settings.
+    """
+    settings.DEBUG = True
+    original_middleware = frozenset(settings.MIDDLEWARE)
+
+    sentry_init(integrations=[DjangoIntegration()], spotlight=True)
+
+    added = frozenset(settings.MIDDLEWARE) ^ original_middleware
+
+    assert "sentry_sdk.spotlight.SpotlightMiddleware" in added
+
+
+def test_ensures_no_spotlight_middleware_when_env_killswitch_is_false(
+    monkeypatch, sentry_init, settings
 ):
-    sentry_init(
-        integrations=[
-            DjangoIntegration(
-                cache_spans=True,
-                middleware_spans=False,
-                signals_spans=False,
-            )
-        ],
-        traces_sample_rate=1.0,
-    )
-    events = capture_events()
+    """
+    Test that ensures if Spotlight is enabled, but is set to a falsy value
+    the relevant SpotlightMiddleware is NOT added to middleware list in settings.
+    """
+    settings.DEBUG = True
+    monkeypatch.setenv("SENTRY_SPOTLIGHT_ON_ERROR", "no")
 
-    client.get(reverse("view_with_cached_template_fragment"))
-    client.get(reverse("view_with_cached_template_fragment"))
+    original_middleware = frozenset(settings.MIDDLEWARE)
 
-    (first_event, second_event) = events
-    assert len(first_event["spans"]) == 1
-    assert first_event["spans"][0]["op"] == "cache.get_item"
-    assert first_event["spans"][0]["description"].startswith(
-        "get template.cache.some_identifier."
-    )
-    assert first_event["spans"][0]["data"] == {"cache.hit": False}
+    sentry_init(integrations=[DjangoIntegration()], spotlight=True)
 
-    assert len(second_event["spans"]) == 1
-    assert second_event["spans"][0]["op"] == "cache.get_item"
-    assert second_event["spans"][0]["description"].startswith(
-        "get template.cache.some_identifier."
-    )
-    assert second_event["spans"][0]["data"]["cache.hit"]
-    assert "cache.item_size" in second_event["spans"][0]["data"]
+    added = frozenset(settings.MIDDLEWARE) ^ original_middleware
+
+    assert "sentry_sdk.spotlight.SpotlightMiddleware" not in added
 
 
-@pytest.mark.parametrize(
-    "method_name, args, kwargs, expected_description",
-    [
-        ("get", None, None, "get "),
-        ("get", [], {}, "get "),
-        ("get", ["bla", "blub", "foo"], {}, "get bla"),
-        (
-            "get_many",
-            [["bla 1", "bla 2", "bla 3"], "blub", "foo"],
-            {},
-            "get_many ['bla 1', 'bla 2', 'bla 3']",
-        ),
-        (
-            "get_many",
-            [["bla 1", "bla 2", "bla 3"], "blub", "foo"],
-            {"key": "bar"},
-            "get_many ['bla 1', 'bla 2', 'bla 3']",
-        ),
-        ("get", [], {"key": "bar"}, "get bar"),
-        (
-            "get",
-            "something",
-            {},
-            "get s",
-        ),  # this should never happen, just making sure that we are not raising an exception in that case.
-    ],
-)
-def test_cache_spans_get_span_description(
-    method_name, args, kwargs, expected_description
+def test_ensures_no_spotlight_middleware_when_no_spotlight(
+    monkeypatch, sentry_init, settings
 ):
-    assert _get_span_description(method_name, args, kwargs) == expected_description
+    """
+    Test that ensures if Spotlight is not enabled
+    the relevant SpotlightMiddleware is NOT added to middleware list in settings.
+    """
+    settings.DEBUG = True
+
+    # We should NOT have the middleware even if the env var is truthy if Spotlight is off
+    monkeypatch.setenv("SENTRY_SPOTLIGHT_ON_ERROR", "1")
+
+    original_middleware = frozenset(settings.MIDDLEWARE)
+
+    sentry_init(integrations=[DjangoIntegration()], spotlight=False)
+
+    added = frozenset(settings.MIDDLEWARE) ^ original_middleware
+
+    assert "sentry_sdk.spotlight.SpotlightMiddleware" not in added
+
+
+def test_get_frame_name_when_in_lazy_object():
+    allowed_to_init = False
+
+    class SimpleLazyObjectWrapper(SimpleLazyObject):
+        def unproxied_method(self):
+            """
+            For testing purposes. We inject a method on the SimpleLazyObject
+            class so if python is executing this method, we should get
+            this class instead of the wrapped class and avoid evaluating
+            the wrapped object too early.
+            """
+            return inspect.currentframe()
+
+    class GetFrame:
+        def __init__(self):
+            assert allowed_to_init, "GetFrame not permitted to initialize yet"
+
+        def proxied_method(self):
+            """
+            For testing purposes. We add an proxied method on the instance
+            class so if python is executing this method, we should get
+            this class instead of the wrapper class.
+            """
+            return inspect.currentframe()
+
+    instance = SimpleLazyObjectWrapper(lambda: GetFrame())
+
+    assert get_frame_name(instance.unproxied_method()) == (
+        "SimpleLazyObjectWrapper.unproxied_method"
+        if sys.version_info < (3, 11)
+        else "test_get_frame_name_when_in_lazy_object.<locals>.SimpleLazyObjectWrapper.unproxied_method"
+    )
+
+    # Now that we're about to access an instance method on the wrapped class,
+    # we should permit initializing it
+    allowed_to_init = True
+
+    assert get_frame_name(instance.proxied_method()) == (
+        "GetFrame.proxied_method"
+        if sys.version_info < (3, 11)
+        else "test_get_frame_name_when_in_lazy_object.<locals>.GetFrame.proxied_method"
+    )

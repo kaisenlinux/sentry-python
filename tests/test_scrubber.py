@@ -4,6 +4,7 @@ import logging
 from sentry_sdk import capture_exception, capture_event, start_transaction, start_span
 from sentry_sdk.utils import event_from_exception
 from sentry_sdk.scrubber import EventScrubber
+from tests.conftest import ApproxDict
 
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ def test_request_scrubbing(sentry_init, capture_events):
                 "COOKIE": "secret",
                 "authorization": "Bearer bla",
                 "ORIGIN": "google.com",
+                "ip_address": "127.0.0.1",
             },
             "cookies": {
                 "sessionid": "secret",
@@ -44,6 +46,7 @@ def test_request_scrubbing(sentry_init, capture_events):
             "COOKIE": "[Filtered]",
             "authorization": "[Filtered]",
             "ORIGIN": "google.com",
+            "ip_address": "[Filtered]",
         },
         "cookies": {"sessionid": "[Filtered]", "foo": "bar"},
         "data": {"token": "[Filtered]", "foo": "bar"},
@@ -53,9 +56,36 @@ def test_request_scrubbing(sentry_init, capture_events):
         "headers": {
             "COOKIE": {"": {"rem": [["!config", "s"]]}},
             "authorization": {"": {"rem": [["!config", "s"]]}},
+            "ip_address": {"": {"rem": [["!config", "s"]]}},
         },
         "cookies": {"sessionid": {"": {"rem": [["!config", "s"]]}}},
         "data": {"token": {"": {"rem": [["!config", "s"]]}}},
+    }
+
+
+def test_ip_address_not_scrubbed_when_pii_enabled(sentry_init, capture_events):
+    sentry_init(send_default_pii=True)
+    events = capture_events()
+
+    try:
+        1 / 0
+    except ZeroDivisionError:
+        ev, _hint = event_from_exception(sys.exc_info())
+
+        ev["request"] = {"headers": {"COOKIE": "secret", "ip_address": "127.0.0.1"}}
+
+        capture_event(ev)
+
+    (event,) = events
+
+    assert event["request"] == {
+        "headers": {"COOKIE": "[Filtered]", "ip_address": "127.0.0.1"}
+    }
+
+    assert event["_meta"]["request"] == {
+        "headers": {
+            "COOKIE": {"": {"rem": [["!config", "s"]]}},
+        }
     }
 
 
@@ -116,23 +146,30 @@ def test_span_data_scrubbing(sentry_init, capture_events):
     events = capture_events()
 
     with start_transaction(name="hi"):
-        with start_span(op="foo", description="bar") as span:
+        with start_span(op="foo", name="bar") as span:
             span.set_data("password", "secret")
             span.set_data("datafoo", "databar")
 
     (event,) = events
-    assert event["spans"][0]["data"] == {"password": "[Filtered]", "datafoo": "databar"}
+    assert event["spans"][0]["data"] == ApproxDict(
+        {"password": "[Filtered]", "datafoo": "databar"}
+    )
     assert event["_meta"]["spans"] == {
         "0": {"data": {"password": {"": {"rem": [["!config", "s"]]}}}}
     }
 
 
 def test_custom_denylist(sentry_init, capture_events):
-    sentry_init(event_scrubber=EventScrubber(denylist=["my_sensitive_var"]))
+    sentry_init(
+        event_scrubber=EventScrubber(
+            denylist=["my_sensitive_var"], pii_denylist=["my_pii_var"]
+        )
+    )
     events = capture_events()
 
     try:
         my_sensitive_var = "secret"  # noqa
+        my_pii_var = "jane.doe"  # noqa
         safe = "keepthis"  # noqa
         1 / 0
     except ZeroDivisionError:
@@ -143,6 +180,7 @@ def test_custom_denylist(sentry_init, capture_events):
     frames = event["exception"]["values"][0]["stacktrace"]["frames"]
     (frame,) = frames
     assert frame["vars"]["my_sensitive_var"] == "[Filtered]"
+    assert frame["vars"]["my_pii_var"] == "[Filtered]"
     assert frame["vars"]["safe"] == "'keepthis'"
 
     meta = event["_meta"]["exception"]["values"]["0"]["stacktrace"]["frames"]["0"][
@@ -150,6 +188,7 @@ def test_custom_denylist(sentry_init, capture_events):
     ]
     assert meta == {
         "my_sensitive_var": {"": {"rem": [["!config", "s"]]}},
+        "my_pii_var": {"": {"rem": [["!config", "s"]]}},
     }
 
 
@@ -169,3 +208,35 @@ def test_scrubbing_doesnt_affect_local_vars(sentry_init, capture_events):
     (frame,) = frames
     assert frame["vars"]["password"] == "[Filtered]"
     assert password == "cat123"
+
+
+def test_recursive_event_scrubber(sentry_init, capture_events):
+    sentry_init(event_scrubber=EventScrubber(recursive=True))
+    events = capture_events()
+    complex_structure = {
+        "deep": {
+            "deeper": [{"deepest": {"password": "my_darkest_secret"}}],
+        },
+    }
+
+    capture_event({"extra": complex_structure})
+
+    (event,) = events
+    assert event["extra"]["deep"]["deeper"][0]["deepest"]["password"] == "'[Filtered]'"
+
+
+def test_recursive_scrubber_does_not_override_original(sentry_init, capture_events):
+    sentry_init(event_scrubber=EventScrubber(recursive=True))
+    events = capture_events()
+
+    data = {"csrf": "secret"}
+    try:
+        raise RuntimeError("An error")
+    except Exception:
+        capture_exception()
+
+    (event,) = events
+    frames = event["exception"]["values"][0]["stacktrace"]["frames"]
+    (frame,) = frames
+    assert data["csrf"] == "secret"
+    assert frame["vars"]["data"]["csrf"] == "[Filtered]"

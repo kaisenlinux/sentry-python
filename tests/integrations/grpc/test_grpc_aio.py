@@ -1,5 +1,3 @@
-from __future__ import absolute_import
-
 import asyncio
 import os
 
@@ -8,13 +6,14 @@ import pytest
 import pytest_asyncio
 import sentry_sdk
 
-from sentry_sdk import Hub, start_transaction
+from sentry_sdk import start_span, start_transaction
 from sentry_sdk.consts import OP
 from sentry_sdk.integrations.grpc import GRPCIntegration
+from tests.conftest import ApproxDict
 from tests.integrations.grpc.grpc_test_service_pb2 import gRPCTestMessage
 from tests.integrations.grpc.grpc_test_service_pb2_grpc import (
-    gRPCTestServiceServicer,
     add_gRPCTestServiceServicer_to_server,
+    gRPCTestServiceServicer,
     gRPCTestServiceStub,
 )
 
@@ -22,22 +21,14 @@ AIO_PORT = 50052
 AIO_PORT += os.getpid() % 100  # avoid port conflicts when running tests in parallel
 
 
-@pytest.fixture(scope="function")
-def event_loop(request):
-    """Create an instance of the default event loop for each test case."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
 @pytest_asyncio.fixture(scope="function")
-async def grpc_server(sentry_init, event_loop):
+async def grpc_server(sentry_init):
     sentry_init(traces_sample_rate=1.0, integrations=[GRPCIntegration()])
     server = grpc.aio.server()
     server.add_insecure_port("[::]:{}".format(AIO_PORT))
     add_gRPCTestServiceServicer_to_server(TestService, server)
 
-    await event_loop.create_task(server.start())
+    await asyncio.create_task(server.start())
 
     try:
         yield server
@@ -46,7 +37,30 @@ async def grpc_server(sentry_init, event_loop):
 
 
 @pytest.mark.asyncio
-async def test_grpc_server_starts_transaction(capture_events, grpc_server):
+async def test_noop_for_unimplemented_method(sentry_init, capture_events):
+    sentry_init(traces_sample_rate=1.0, integrations=[GRPCIntegration()])
+    server = grpc.aio.server()
+    server.add_insecure_port("[::]:{}".format(AIO_PORT))
+
+    await asyncio.create_task(server.start())
+
+    events = capture_events()
+    try:
+        async with grpc.aio.insecure_channel(
+            "localhost:{}".format(AIO_PORT)
+        ) as channel:
+            stub = gRPCTestServiceStub(channel)
+            with pytest.raises(grpc.RpcError) as exc:
+                await stub.TestServe(gRPCTestMessage(text="test"))
+            assert exc.value.details() == "Method not found!"
+    finally:
+        await server.stop(None)
+
+    assert not events
+
+
+@pytest.mark.asyncio
+async def test_grpc_server_starts_transaction(grpc_server, capture_events):
     events = capture_events()
 
     async with grpc.aio.insecure_channel("localhost:{}".format(AIO_PORT)) as channel:
@@ -65,7 +79,7 @@ async def test_grpc_server_starts_transaction(capture_events, grpc_server):
 
 
 @pytest.mark.asyncio
-async def test_grpc_server_continues_transaction(capture_events, grpc_server):
+async def test_grpc_server_continues_transaction(grpc_server, capture_events):
     events = capture_events()
 
     async with grpc.aio.insecure_channel("localhost:{}".format(AIO_PORT)) as channel:
@@ -105,7 +119,7 @@ async def test_grpc_server_continues_transaction(capture_events, grpc_server):
 
 
 @pytest.mark.asyncio
-async def test_grpc_server_exception(capture_events, grpc_server):
+async def test_grpc_server_exception(grpc_server, capture_events):
     events = capture_events()
 
     async with grpc.aio.insecure_channel("localhost:{}".format(AIO_PORT)) as channel:
@@ -125,7 +139,7 @@ async def test_grpc_server_exception(capture_events, grpc_server):
 
 
 @pytest.mark.asyncio
-async def test_grpc_server_abort(capture_events, grpc_server):
+async def test_grpc_server_abort(grpc_server, capture_events):
     events = capture_events()
 
     async with grpc.aio.insecure_channel("localhost:{}".format(AIO_PORT)) as channel:
@@ -140,9 +154,7 @@ async def test_grpc_server_abort(capture_events, grpc_server):
 
 
 @pytest.mark.asyncio
-async def test_grpc_client_starts_span(
-    grpc_server, sentry_init, capture_events_forksafe
-):
+async def test_grpc_client_starts_span(grpc_server, capture_events_forksafe):
     events = capture_events_forksafe()
 
     async with grpc.aio.insecure_channel("localhost:{}".format(AIO_PORT)) as channel:
@@ -161,11 +173,13 @@ async def test_grpc_client_starts_span(
         span["description"]
         == "unary unary call to /grpc_test_server.gRPCTestService/TestServe"
     )
-    assert span["data"] == {
-        "type": "unary unary",
-        "method": "/grpc_test_server.gRPCTestService/TestServe",
-        "code": "OK",
-    }
+    assert span["data"] == ApproxDict(
+        {
+            "type": "unary unary",
+            "method": "/grpc_test_server.gRPCTestService/TestServe",
+            "code": "OK",
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -190,15 +204,18 @@ async def test_grpc_client_unary_stream_starts_span(
         span["description"]
         == "unary stream call to /grpc_test_server.gRPCTestService/TestUnaryStream"
     )
-    assert span["data"] == {
-        "type": "unary stream",
-        "method": "/grpc_test_server.gRPCTestService/TestUnaryStream",
-    }
+    assert span["data"] == ApproxDict(
+        {
+            "type": "unary stream",
+            "method": "/grpc_test_server.gRPCTestService/TestUnaryStream",
+        }
+    )
 
 
 @pytest.mark.asyncio
 async def test_stream_stream(grpc_server):
-    """Test to verify stream-stream works.
+    """
+    Test to verify stream-stream works.
     Tracing not supported for it yet.
     """
     async with grpc.aio.insecure_channel("localhost:{}".format(AIO_PORT)) as channel:
@@ -210,7 +227,8 @@ async def test_stream_stream(grpc_server):
 
 @pytest.mark.asyncio
 async def test_stream_unary(grpc_server):
-    """Test to verify stream-stream works.
+    """
+    Test to verify stream-stream works.
     Tracing not supported for it yet.
     """
     async with grpc.aio.insecure_channel("localhost:{}".format(AIO_PORT)) as channel:
@@ -219,15 +237,46 @@ async def test_stream_unary(grpc_server):
         assert response.text == "test"
 
 
+@pytest.mark.asyncio
+async def test_span_origin(grpc_server, capture_events_forksafe):
+    events = capture_events_forksafe()
+
+    async with grpc.aio.insecure_channel("localhost:{}".format(AIO_PORT)) as channel:
+        stub = gRPCTestServiceStub(channel)
+        with start_transaction(name="custom_transaction"):
+            await stub.TestServe(gRPCTestMessage(text="test"))
+
+    events.write_file.close()
+
+    transaction_from_integration = events.read_event()
+    custom_transaction = events.read_event()
+
+    assert (
+        transaction_from_integration["contexts"]["trace"]["origin"] == "auto.grpc.grpc"
+    )
+    assert (
+        transaction_from_integration["spans"][0]["origin"]
+        == "auto.grpc.grpc.TestService.aio"
+    )  # manually created in TestService, not the instrumentation
+
+    assert custom_transaction["contexts"]["trace"]["origin"] == "manual"
+    assert custom_transaction["spans"][0]["origin"] == "auto.grpc.grpc"
+
+
 class TestService(gRPCTestServiceServicer):
     class TestException(Exception):
+        __test__ = False
+
         def __init__(self):
             super().__init__("test")
 
     @classmethod
     async def TestServe(cls, request, context):  # noqa: N802
-        hub = Hub.current
-        with hub.start_span(op="test", description="test"):
+        with start_span(
+            op="test",
+            name="test",
+            origin="auto.grpc.grpc.TestService.aio",
+        ):
             pass
 
         if request.text == "exception":

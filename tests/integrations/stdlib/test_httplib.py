@@ -1,33 +1,17 @@
 import random
+from http.client import HTTPConnection, HTTPSConnection
+from socket import SocketIO
+from urllib.request import urlopen
+from unittest import mock
 
 import pytest
-
-try:
-    # py3
-    from urllib.request import urlopen
-except ImportError:
-    # py2
-    from urllib import urlopen
-
-try:
-    # py2
-    from httplib import HTTPConnection, HTTPSConnection
-except ImportError:
-    # py3
-    from http.client import HTTPConnection, HTTPSConnection
-
-try:
-    from unittest import mock  # python 3.3 and above
-except ImportError:
-    import mock  # python < 3.3
-
 
 from sentry_sdk import capture_message, start_transaction
 from sentry_sdk.consts import MATCH_ALL, SPANDATA
 from sentry_sdk.tracing import Transaction
 from sentry_sdk.integrations.stdlib import StdlibIntegration
 
-from tests.conftest import create_mock_http_server
+from tests.conftest import ApproxDict, create_mock_http_server
 
 PORT = create_mock_http_server()
 
@@ -46,14 +30,16 @@ def test_crumb_capture(sentry_init, capture_events):
 
     assert crumb["type"] == "http"
     assert crumb["category"] == "httplib"
-    assert crumb["data"] == {
-        "url": url,
-        SPANDATA.HTTP_METHOD: "GET",
-        SPANDATA.HTTP_STATUS_CODE: 200,
-        "reason": "OK",
-        SPANDATA.HTTP_FRAGMENT: "",
-        SPANDATA.HTTP_QUERY: "",
-    }
+    assert crumb["data"] == ApproxDict(
+        {
+            "url": url,
+            SPANDATA.HTTP_METHOD: "GET",
+            SPANDATA.HTTP_STATUS_CODE: 200,
+            "reason": "OK",
+            SPANDATA.HTTP_FRAGMENT: "",
+            SPANDATA.HTTP_QUERY: "",
+        }
+    )
 
 
 def test_crumb_capture_hint(sentry_init, capture_events):
@@ -73,15 +59,17 @@ def test_crumb_capture_hint(sentry_init, capture_events):
     (crumb,) = event["breadcrumbs"]["values"]
     assert crumb["type"] == "http"
     assert crumb["category"] == "httplib"
-    assert crumb["data"] == {
-        "url": url,
-        SPANDATA.HTTP_METHOD: "GET",
-        SPANDATA.HTTP_STATUS_CODE: 200,
-        "reason": "OK",
-        "extra": "foo",
-        SPANDATA.HTTP_FRAGMENT: "",
-        SPANDATA.HTTP_QUERY: "",
-    }
+    assert crumb["data"] == ApproxDict(
+        {
+            "url": url,
+            SPANDATA.HTTP_METHOD: "GET",
+            SPANDATA.HTTP_STATUS_CODE: 200,
+            "reason": "OK",
+            "extra": "foo",
+            SPANDATA.HTTP_FRAGMENT: "",
+            SPANDATA.HTTP_QUERY: "",
+        }
+    )
 
 
 def test_empty_realurl(sentry_init):
@@ -131,14 +119,16 @@ def test_httplib_misuse(sentry_init, capture_events, request):
 
     assert crumb["type"] == "http"
     assert crumb["category"] == "httplib"
-    assert crumb["data"] == {
-        "url": "http://localhost:{}/200".format(PORT),
-        SPANDATA.HTTP_METHOD: "GET",
-        SPANDATA.HTTP_STATUS_CODE: 200,
-        "reason": "OK",
-        SPANDATA.HTTP_FRAGMENT: "",
-        SPANDATA.HTTP_QUERY: "",
-    }
+    assert crumb["data"] == ApproxDict(
+        {
+            "url": "http://localhost:{}/200".format(PORT),
+            SPANDATA.HTTP_METHOD: "GET",
+            SPANDATA.HTTP_STATUS_CODE: 200,
+            "reason": "OK",
+            SPANDATA.HTTP_FRAGMENT: "",
+            SPANDATA.HTTP_QUERY: "",
+        }
+    )
 
 
 def test_outgoing_trace_headers(sentry_init, monkeypatch):
@@ -182,16 +172,14 @@ def test_outgoing_trace_headers(sentry_init, monkeypatch):
         )
         assert request_headers["sentry-trace"] == expected_sentry_trace
 
-        expected_outgoing_baggage_items = [
-            "sentry-trace_id=771a43a4192642f0b136d5159a501700",
-            "sentry-public_key=49d0f7386ad645858ae85020e393bef3",
-            "sentry-sample_rate=0.01337",
-            "sentry-user_id=Am%C3%A9lie",
-        ]
-
-        assert sorted(request_headers["baggage"].split(",")) == sorted(
-            expected_outgoing_baggage_items
+        expected_outgoing_baggage = (
+            "sentry-trace_id=771a43a4192642f0b136d5159a501700,"
+            "sentry-public_key=49d0f7386ad645858ae85020e393bef3,"
+            "sentry-sample_rate=0.01337,"
+            "sentry-user_id=Am%C3%A9lie"
         )
+
+        assert request_headers["baggage"] == expected_outgoing_baggage
 
 
 def test_outgoing_trace_headers_head_sdk(sentry_init, monkeypatch):
@@ -225,17 +213,15 @@ def test_outgoing_trace_headers_head_sdk(sentry_init, monkeypatch):
         )
         assert request_headers["sentry-trace"] == expected_sentry_trace
 
-        expected_outgoing_baggage_items = [
-            "sentry-trace_id=%s" % transaction.trace_id,
-            "sentry-sample_rate=0.5",
-            "sentry-sampled=%s" % "true" if transaction.sampled else "false",
-            "sentry-release=foo",
-            "sentry-environment=production",
-        ]
+        expected_outgoing_baggage = (
+            "sentry-trace_id=%s,"
+            "sentry-environment=production,"
+            "sentry-release=foo,"
+            "sentry-sample_rate=0.5,"
+            "sentry-sampled=%s"
+        ) % (transaction.trace_id, "true" if transaction.sampled else "false")
 
-        assert sorted(request_headers["baggage"].split(",")) == sorted(
-            expected_outgoing_baggage_items
-        )
+        assert request_headers["baggage"] == expected_outgoing_baggage
 
 
 @pytest.mark.parametrize(
@@ -341,3 +327,51 @@ def test_option_trace_propagation_targets(
         else:
             assert "sentry-trace" not in request_headers
             assert "baggage" not in request_headers
+
+
+def test_span_origin(sentry_init, capture_events):
+    sentry_init(traces_sample_rate=1.0, debug=True)
+    events = capture_events()
+
+    with start_transaction(name="foo"):
+        conn = HTTPSConnection("example.com")
+        conn.request("GET", "/foo")
+        conn.getresponse()
+
+    (event,) = events
+    assert event["contexts"]["trace"]["origin"] == "manual"
+
+    assert event["spans"][0]["op"] == "http.client"
+    assert event["spans"][0]["origin"] == "auto.http.stdlib.httplib"
+
+
+def test_http_timeout(monkeypatch, sentry_init, capture_envelopes):
+    mock_readinto = mock.Mock(side_effect=TimeoutError)
+    monkeypatch.setattr(SocketIO, "readinto", mock_readinto)
+
+    sentry_init(traces_sample_rate=1.0)
+
+    envelopes = capture_envelopes()
+
+    with start_transaction(op="op", name="name"):
+        try:
+            conn = HTTPSConnection("www.squirrelchasers.com")
+            conn.request("GET", "/top-chasers")
+            conn.getresponse()
+        except Exception:
+            pass
+
+    items = [
+        item
+        for envelope in envelopes
+        for item in envelope.items
+        if item.type == "transaction"
+    ]
+    assert len(items) == 1
+
+    transaction = items[0].payload.json
+    assert len(transaction["spans"]) == 1
+
+    span = transaction["spans"][0]
+    assert span["op"] == "http.client"
+    assert span["description"] == "GET https://www.squirrelchasers.com/top-chasers"

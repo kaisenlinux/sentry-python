@@ -45,7 +45,7 @@ class A:
         return self.fn()
 
 
-class B(A, object):
+class B(A):
     def fa(self, x, element=False, another_element=False):
         if x or (element and not another_element):
             # print(self.r)
@@ -55,7 +55,7 @@ class B(A, object):
 
     def __init__(self):
         self.r = "We are in B"
-        super(B, self).__init__(self.fa)
+        super().__init__(self.fa)
 
 
 class SimpleFunc(DoFn):
@@ -182,7 +182,11 @@ def init_beam(sentry_init):
         signature = pardo._signature
         output_processor = _OutputHandler()
         return DoFnInvoker.create_invoker(
-            signature, output_processor, DoFnContext("test")
+            signature,
+            output_processor,
+            DoFnContext("test"),
+            input_args=[],
+            input_kwargs={},
         )
 
     return inner
