@@ -24,15 +24,13 @@ from sentry_sdk.utils import Dsn, logger, capture_internal_exceptions
 from sentry_sdk.worker import BackgroundWorker
 from sentry_sdk.envelope import Envelope, Item, PayloadRef
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast, List, Dict
 
 if TYPE_CHECKING:
     from typing import Any
     from typing import Callable
-    from typing import Dict
     from typing import DefaultDict
     from typing import Iterable
-    from typing import List
     from typing import Mapping
     from typing import Optional
     from typing import Self
@@ -198,6 +196,8 @@ def _parse_rate_limits(header, now=None):
 class BaseHttpTransport(Transport):
     """The base HTTP transport."""
 
+    TIMEOUT = 30  # seconds
+
     def __init__(self, options):
         # type: (Self, Dict[str, Any]) -> None
         from sentry_sdk.consts import VERSION
@@ -280,7 +280,9 @@ class BaseHttpTransport(Transport):
                 event = item.get_transaction_event() or {}
 
                 # +1 for the transaction itself
-                span_count = len(event.get("spans") or []) + 1
+                span_count = (
+                    len(cast(List[Dict[str, object]], event.get("spans") or [])) + 1
+                )
                 self.record_lost_event(reason, "span", quantity=span_count)
 
             elif data_category == "attachment":
@@ -621,6 +623,7 @@ class HttpTransport(BaseHttpTransport):
         options = {
             "num_pools": 2 if num_pools is None else int(num_pools),
             "cert_reqs": "CERT_REQUIRED",
+            "timeout": urllib3.Timeout(total=self.TIMEOUT),
         }
 
         socket_options = None  # type: Optional[List[Tuple[int, int, int | bytes]]]
@@ -720,7 +723,7 @@ class HttpTransport(BaseHttpTransport):
 
 try:
     import httpcore
-    import h2  # type: ignore # noqa: F401
+    import h2  # noqa: F401
 except ImportError:
     # Sorry, no Http2Transport for you
     class Http2Transport(HttpTransport):
@@ -735,6 +738,8 @@ else:
 
     class Http2Transport(BaseHttpTransport):  # type: ignore
         """The HTTP2 transport based on httpcore."""
+
+        TIMEOUT = 15
 
         if TYPE_CHECKING:
             _pool: Union[
@@ -765,6 +770,14 @@ else:
                 self._auth.get_api_url(endpoint_type),
                 content=body,
                 headers=headers,  # type: ignore
+                extensions={
+                    "timeout": {
+                        "pool": self.TIMEOUT,
+                        "connect": self.TIMEOUT,
+                        "write": self.TIMEOUT,
+                        "read": self.TIMEOUT,
+                    }
+                },
             )
             return response
 

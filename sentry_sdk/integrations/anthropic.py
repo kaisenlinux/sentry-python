@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 import sentry_sdk
 from sentry_sdk.ai.monitoring import record_token_usage
 from sentry_sdk.consts import OP, SPANDATA
-from sentry_sdk.integrations import DidNotEnable, Integration
+from sentry_sdk.integrations import _check_minimum_version, DidNotEnable, Integration
 from sentry_sdk.scope import should_send_default_pii
 from sentry_sdk.utils import (
     capture_internal_exceptions,
@@ -37,12 +37,7 @@ class AnthropicIntegration(Integration):
     def setup_once():
         # type: () -> None
         version = package_version("anthropic")
-
-        if version is None:
-            raise DidNotEnable("Unparsable anthropic version.")
-
-        if version < (0, 16):
-            raise DidNotEnable("anthropic 0.16 or newer required.")
+        _check_minimum_version(AnthropicIntegration, version)
 
         Messages.create = _wrap_message_create(Messages.create)
         AsyncMessages.create = _wrap_message_create_async(AsyncMessages.create)
@@ -106,6 +101,8 @@ def _collect_ai_data(event, input_tokens, output_tokens, content_blocks):
             elif event.type == "content_block_delta":
                 if hasattr(event.delta, "text"):
                     content_blocks.append(event.delta.text)
+                elif hasattr(event.delta, "partial_json"):
+                    content_blocks.append(event.delta.partial_json)
             elif event.type == "content_block_stop":
                 pass
             elif event.type == "message_delta":
@@ -187,8 +184,7 @@ def _sentry_patched_create_common(f, *args, **kwargs):
                     input_tokens, output_tokens, content_blocks = _collect_ai_data(
                         event, input_tokens, output_tokens, content_blocks
                     )
-                    if event.type != "message_stop":
-                        yield event
+                    yield event
 
                 _add_ai_data_to_span(
                     span, integration, input_tokens, output_tokens, content_blocks
@@ -205,8 +201,7 @@ def _sentry_patched_create_common(f, *args, **kwargs):
                     input_tokens, output_tokens, content_blocks = _collect_ai_data(
                         event, input_tokens, output_tokens, content_blocks
                     )
-                    if event.type != "message_stop":
-                        yield event
+                    yield event
 
                 _add_ai_data_to_span(
                     span, integration, input_tokens, output_tokens, content_blocks

@@ -7,6 +7,7 @@ from unittest import mock
 import pytest
 
 import sentry_sdk
+from sentry_sdk._compat import PY38
 from sentry_sdk.integrations import Integration
 from sentry_sdk._queue import Queue
 from sentry_sdk.utils import (
@@ -650,12 +651,12 @@ def test_installed_modules():
 
     if importlib_available:
         importlib_distributions = {
-            _normalize_distribution_name(dist.metadata["Name"]): version(
-                dist.metadata["Name"]
+            _normalize_distribution_name(dist.metadata.get("Name", None)): version(
+                dist.metadata.get("Name", None)
             )
             for dist in distributions()
-            if dist.metadata["Name"] is not None
-            and version(dist.metadata["Name"]) is not None
+            if dist.metadata.get("Name", None) is not None
+            and version(dist.metadata.get("Name", None)) is not None
         }
         assert installed_distributions == importlib_distributions
 
@@ -901,6 +902,7 @@ def test_get_current_thread_meta_main_thread():
     assert (main_thread.ident, main_thread.name) == results.get(timeout=1)
 
 
+@pytest.mark.skipif(PY38, reason="Flakes a lot on 3.8 in CI.")
 def test_get_current_thread_meta_failed_to_get_main_thread():
     results = Queue(maxsize=1)
 
@@ -951,3 +953,23 @@ def test_format_timestamp_naive():
     # Ensure that some timestamp is returned, without error. We currently treat these as local time, but this is an
     # implementation detail which we should not assert here.
     assert re.fullmatch(timestamp_regex, format_timestamp(datetime_object))
+
+
+def test_qualname_from_function_inner_function():
+    def test_function(): ...
+
+    assert (
+        sentry_sdk.utils.qualname_from_function(test_function)
+        == "tests.test_utils.test_qualname_from_function_inner_function.<locals>.test_function"
+    )
+
+
+def test_qualname_from_function_none_name():
+    def test_function(): ...
+
+    test_function.__module__ = None
+
+    assert (
+        sentry_sdk.utils.qualname_from_function(test_function)
+        == "test_qualname_from_function_none_name.<locals>.test_function"
+    )

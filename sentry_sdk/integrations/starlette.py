@@ -3,6 +3,7 @@ import functools
 import warnings
 from collections.abc import Set
 from copy import deepcopy
+from json import JSONDecodeError
 
 import sentry_sdk
 from sentry_sdk.consts import OP
@@ -21,8 +22,7 @@ from sentry_sdk.integrations.asgi import SentryAsgiMiddleware
 from sentry_sdk.scope import should_send_default_pii
 from sentry_sdk.tracing import (
     SOURCE_FOR_STYLE,
-    TRANSACTION_SOURCE_COMPONENT,
-    TRANSACTION_SOURCE_ROUTE,
+    TransactionSource,
 )
 from sentry_sdk.utils import (
     AnnotatedValue,
@@ -363,13 +363,13 @@ def patch_middlewares():
 
     if not_yet_patched:
 
-        def _sentry_middleware_init(self, cls, **options):
-            # type: (Any, Any, Any) -> None
+        def _sentry_middleware_init(self, cls, *args, **kwargs):
+            # type: (Any, Any, Any, Any) -> None
             if cls == SentryAsgiMiddleware:
-                return old_middleware_init(self, cls, **options)
+                return old_middleware_init(self, cls, *args, **kwargs)
 
             span_enabled_cls = _enable_span_for_middleware(cls)
-            old_middleware_init(self, span_enabled_cls, **options)
+            old_middleware_init(self, span_enabled_cls, *args, **kwargs)
 
             if cls == AuthenticationMiddleware:
                 patch_authentication_middleware(cls)
@@ -681,8 +681,10 @@ class StarletteRequestExtractor:
         # type: (StarletteRequestExtractor) -> Optional[Dict[str, Any]]
         if not self.is_json():
             return None
-
-        return await self.request.json()
+        try:
+            return await self.request.json()
+        except JSONDecodeError:
+            return None
 
 
 def _transaction_name_from_router(scope):
@@ -694,7 +696,11 @@ def _transaction_name_from_router(scope):
     for route in router.routes:
         match = route.matches(scope)
         if match[0] == Match.FULL:
-            return route.path
+            try:
+                return route.path
+            except AttributeError:
+                # routes added via app.host() won't have a path attribute
+                return scope.get("path")
 
     return None
 
@@ -714,7 +720,7 @@ def _set_transaction_name_and_source(scope, transaction_style, request):
 
     if name is None:
         name = _DEFAULT_TRANSACTION_NAME
-        source = TRANSACTION_SOURCE_ROUTE
+        source = TransactionSource.ROUTE
 
     scope.set_transaction_name(name, source=source)
     logger.debug(
@@ -729,9 +735,9 @@ def _get_transaction_from_middleware(app, asgi_scope, integration):
 
     if integration.transaction_style == "endpoint":
         name = transaction_from_function(app.__class__)
-        source = TRANSACTION_SOURCE_COMPONENT
+        source = TransactionSource.COMPONENT
     elif integration.transaction_style == "url":
         name = _transaction_name_from_router(asgi_scope)
-        source = TRANSACTION_SOURCE_ROUTE
+        source = TransactionSource.ROUTE
 
     return name, source

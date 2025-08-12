@@ -38,7 +38,7 @@ class SpotlightClient:
         # type: (str) -> None
         self.url = url
         self.http = urllib3.PoolManager()
-        self.tries = 0
+        self.fails = 0
 
     def capture_envelope(self, envelope):
         # type: (Envelope) -> None
@@ -54,9 +54,18 @@ class SpotlightClient:
                 },
             )
             req.close()
+            self.fails = 0
         except Exception as e:
-            # TODO: Implement buffering and retrying with exponential backoff
-            sentry_logger.warning(str(e))
+            if self.fails < 2:
+                sentry_logger.warning(str(e))
+                self.fails += 1
+            elif self.fails == 2:
+                self.fails += 1
+                sentry_logger.warning(
+                    "Looks like Spotlight is not running, will keep trying to send events but will not log errors."
+                )
+            # omitting self.fails += 1 in the `else:` case intentionally
+            # to avoid overflowing the variable if Spotlight never becomes reachable
 
 
 try:
@@ -66,7 +75,8 @@ try:
 
     SPOTLIGHT_JS_ENTRY_PATH = "/assets/main.js"
     SPOTLIGHT_JS_SNIPPET_PATTERN = (
-        '<script type="module" crossorigin src="{}"></script>'
+        "<script>window.__spotlight = {{ initOptions: {{ sidecarUrl: '{spotlight_url}', fullPage: false }} }};</script>\n"
+        '<script type="module" crossorigin src="{spotlight_js_url}"></script>\n'
     )
     SPOTLIGHT_ERROR_PAGE_SNIPPET = (
         '<html><base href="{spotlight_url}">\n'
@@ -81,6 +91,7 @@ try:
 
     class SpotlightMiddleware(MiddlewareMixin):  # type: ignore[misc]
         _spotlight_script = None  # type: Optional[str]
+        _spotlight_url = None  # type: Optional[str]
 
         def __init__(self, get_response):
             # type: (Self, Callable[..., HttpResponse]) -> None
@@ -102,7 +113,7 @@ try:
         @property
         def spotlight_script(self):
             # type: (Self) -> Optional[str]
-            if self._spotlight_script is None:
+            if self._spotlight_url is not None and self._spotlight_script is None:
                 try:
                     spotlight_js_url = urllib.parse.urljoin(
                         self._spotlight_url, SPOTLIGHT_JS_ENTRY_PATH
@@ -113,7 +124,8 @@ try:
                     )
                     urllib.request.urlopen(req)
                     self._spotlight_script = SPOTLIGHT_JS_SNIPPET_PATTERN.format(
-                        spotlight_js_url
+                        spotlight_url=self._spotlight_url,
+                        spotlight_js_url=spotlight_js_url,
                     )
                 except urllib.error.URLError as err:
                     sentry_logger.debug(
@@ -171,7 +183,7 @@ try:
 
         def process_exception(self, _request, exception):
             # type: (Self, HttpRequest, Exception) -> Optional[HttpResponseServerError]
-            if not settings.DEBUG:
+            if not settings.DEBUG or not self._spotlight_url:
                 return None
 
             try:
@@ -210,13 +222,13 @@ def setup_spotlight(options):
     if not isinstance(url, str):
         return None
 
-    if (
-        settings is not None
-        and settings.DEBUG
-        and env_to_bool(os.environ.get("SENTRY_SPOTLIGHT_ON_ERROR", "1"))
-        and env_to_bool(os.environ.get("SENTRY_SPOTLIGHT_MIDDLEWARE", "1"))
-    ):
-        with capture_internal_exceptions():
+    with capture_internal_exceptions():
+        if (
+            settings is not None
+            and settings.DEBUG
+            and env_to_bool(os.environ.get("SENTRY_SPOTLIGHT_ON_ERROR", "1"))
+            and env_to_bool(os.environ.get("SENTRY_SPOTLIGHT_MIDDLEWARE", "1"))
+        ):
             middleware = settings.MIDDLEWARE
             if DJANGO_SPOTLIGHT_MIDDLEWARE_PATH not in middleware:
                 settings.MIDDLEWARE = type(middleware)(

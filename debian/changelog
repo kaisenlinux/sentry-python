@@ -1,3 +1,9 @@
+sentry-python (2.26.1-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 2.26.1 release
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Fri, 08 Aug 2025 01:46:21 +0200
+
 sentry-python (2.19.2-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 2.19.2 release

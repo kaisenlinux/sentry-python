@@ -6,7 +6,7 @@ import sentry_sdk
 from sentry_sdk import isolation_scope
 from sentry_sdk.api import continue_trace
 from sentry_sdk.consts import OP, SPANSTATUS, SPANDATA
-from sentry_sdk.integrations import Integration, DidNotEnable
+from sentry_sdk.integrations import _check_minimum_version, Integration, DidNotEnable
 from sentry_sdk.integrations.celery.beat import (
     _patch_beat_apply_entry,
     _patch_redbeat_maybe_due,
@@ -14,7 +14,7 @@ from sentry_sdk.integrations.celery.beat import (
 )
 from sentry_sdk.integrations.celery.utils import _now_seconds_since_epoch
 from sentry_sdk.integrations.logging import ignore_logger
-from sentry_sdk.tracing import BAGGAGE_HEADER_NAME, TRANSACTION_SOURCE_TASK
+from sentry_sdk.tracing import BAGGAGE_HEADER_NAME, TransactionSource
 from sentry_sdk.tracing_utils import Baggage
 from sentry_sdk.utils import (
     capture_internal_exceptions,
@@ -79,8 +79,7 @@ class CeleryIntegration(Integration):
     @staticmethod
     def setup_once():
         # type: () -> None
-        if CELERY_VERSION < (4, 4, 7):
-            raise DidNotEnable("Celery 4.4.7 or newer required.")
+        _check_minimum_version(CeleryIntegration, CELERY_VERSION)
 
         _patch_build_tracer()
         _patch_task_apply_async()
@@ -320,7 +319,7 @@ def _wrap_tracer(task, f):
                     headers,
                     op=OP.QUEUE_TASK_CELERY,
                     name="unknown celery task",
-                    source=TRANSACTION_SOURCE_TASK,
+                    source=TransactionSource.TASK,
                     origin=CeleryIntegration.origin,
                 )
                 transaction.name = task.name
